@@ -5,10 +5,6 @@ Group project for MDSI assignment 3
 ## Project Description
 This project analyses bus performance data in Sydney, including on-time running, cancellations, and passenger trips across different regions and card types.
 
-## Team Members
-- YiAn Tsai
-- Nandeeswari Kumara
-- Nathan Lu
 
 ## File Structure
 - `datacleaning.ipynb` — data cleaning notebook
