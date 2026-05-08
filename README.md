@@ -22,3 +22,29 @@ This project analyses bus performance data in Sydney, including on-time running,
 
 ## Data Source
 Transport for NSW — Bus Performance Reports
+
+## 🚀 Getting Started
+
+Follow these steps to set up the project on your local machine.
+
+### 1. Install Dependencies
+Open your console/terminal and run the following command to install the necessary Python libraries:
+```bash
+pip install -r requirements.txt
+```
+### 2. Obtain a TfNSW API Key
+Register: Create an account at the TfNSW Open Data Hub. -> https://opendata.transport.nsw.gov.au
+
+Create Token: Navigate to your Profile, go to the API Tokens tab, then name and create an API Key.
+
+### 3. Environment Configuration
+Create a file named .env in the root directory (the same folder as your app.py). Add your API key to this file exactly as shown below:
+
+```Plaintext
+TRANSPORT_API_KEY = 'PASTE_API_KEY_HERE'
+```
+### 4. Run the Application
+Ensure your console is in the correct directory, then execute:
+
+```vash
+streamlit run app.py
