@@ -12,13 +12,9 @@
 
 import streamlit as st          # The main library that builds the web app
 import pandas as pd             # For loading and working with our data
-import numpy as np              # For maths/calculations
 import plotly.graph_objects as go  # For building interactive charts
 import plotly.express as px # Simpler chart-building on top of plotly
 
-import urllib.request
-import json
-from pathlib import Path
 import pydeck as pdk
 
 import os
@@ -98,11 +94,6 @@ st.markdown("""
 # it runs. Without it, the files would be re-read every
 # time the user clicks anything. With it, the app is fast.
 # ============================================================
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def test_load_geo_json(file_path):
-    with open(file_path, 'r') as f:
-        return json.load(f)
 
 @st.cache_data
 def load_static_data():
@@ -229,13 +220,6 @@ with st.sidebar:
         help="GS = Greater Sydney | ROM = Outer Metropolitan (Blue Mountains, Hunter, Illawarra, etc.)"
     )
 
-    # Toggle to show/hide the imputed (estimated) data points
-    # show_imputed = st.toggle(
-    #     "Show projected data (Mar–Jun 2026)",
-    #     value=True,
-    #     help="Values after Feb 2026 were estimated using regional averages — not real measurements."
-    # )
-
     st.markdown("---")
     st.markdown("### 📌 About this dashboard")
     st.markdown("""
@@ -264,45 +248,12 @@ elif selected_region == "ROM – Outer Metropolitan":
 else:
     perf_f = perf.copy()
 
-# Further filter to hide imputed rows if the user toggled it off
-# if not show_imputed:
-#     perf_f = perf_f[~perf_f["is_imputed"]].copy()
-
 
 # ============================================================
 # STEP 7: HERO SECTION
 # The title and four big "metric cards" at the very top.
 # These give the reader the headline numbers immediately.
 # ============================================================
-
-#Doesnt show all the data we want because we need the NSW data its too large.. -> though I do not know what data would be usefull to put on a map anyway..
-# try:
-#     geojson_data = test_load_geo_json('sydney_bus.geojson')
-
-#     geojson_layer = pdk.Layer(
-#         "GeoJsonLayer",
-#         geojson_data,
-#         opacity=0.5,
-#         stroked=True,
-#         filled=True,
-#         get_fill_color=[20, 30, 200],
-#         get_line_color=[255, 255, 255],
-#         line_width_min_pixels=1,
-#     )
-
-#     # Set the initial view
-#     view_state = pdk.ViewState(latitude=-33.8688, longitude=151.2093, zoom=10)
-
-#     # Render the map
-#     st.pydeck_chart(pdk.Deck(
-#         layers=[geojson_layer],
-#         initial_view_state=view_state,
-#         map_style='dark'
-#     ),
-#     width = 800
-#     )
-# except FileNotFoundError:
-#     st.error("Wrong file path")
 
 st.markdown("""
 <h1 style='color:#1B5E96; margin-bottom:4px'>
@@ -362,17 +313,6 @@ Together, these two regions paint a picture of a network under pressure, where t
 </div>
 """, unsafe_allow_html=True)
 
-# Show the imputed data warning only when projected data is turned on
-# if show_imputed:
-#     st.markdown("""
-#     <div class='imputed-warning'>
-#     ⚠️ <b>Data transparency note:</b> Values from <b>March–June 2026</b> were <b>estimated using regional averages</b>
-#     (mean imputation), not real measurements. They appear as dashed lines in the charts below.
-#     Treat them as indicative projections, not confirmed data.
-#     </div>
-#     """, unsafe_allow_html=True)
-
-
 # ============================================================
 # ── LAYER 1: SERVICE RELIABILITY ────────────────────────────
 # ============================================================
@@ -402,8 +342,7 @@ for region, colour in [("GS", COL_GS), ("ROM", COL_ROM)]:
     if subset.empty:
         continue
 
-    real_rows    = subset[~subset["is_imputed"]]
-    imputed_rows = subset[subset["is_imputed"]]
+    real_rows = subset[~subset["is_imputed"]]
 
     # Solid line = actual measured data
     fig1.add_trace(go.Scatter(
@@ -419,23 +358,6 @@ for region, colour in [("GS", COL_GS), ("ROM", COL_ROM)]:
             "OTR: %{y:.1%}<extra></extra>"
         )
     ))
-    # Dashed line = imputed/projected data
-    # if show_imputed and not imputed_rows.empty:
-    #     # Join the last real point to the first imputed so the line is continuous
-    #     bridge = pd.concat([real_rows.tail(1), imputed_rows])
-    #     fig1.add_trace(go.Scatter(
-    #         x=bridge["Month"],
-    #         y=bridge["OTR"],
-    #         mode="lines",
-    #         name=f"{region} (projected)",
-    #         line=dict(color=colour, width=2, dash="dash"),
-    #         opacity=0.55,
-    #         hovertemplate=(
-    #             f"<b>{region} — projected</b><br>"
-    #             "Month: %{x|%b %Y}<br>"
-    #             "OTR: %{y:.1%}<extra></extra>"
-    #         )
-    #     ))
 
 # Red dotted reference line at 95% target
 fig1.add_hline(
@@ -477,8 +399,7 @@ for region, colour in [("GS", COL_GS), ("ROM", COL_ROM)]:
     if subset.empty:
         continue
 
-    real_rows    = subset[~subset["is_imputed"]]
-    imputed_rows = subset[subset["is_imputed"]]
+    real_rows = subset[~subset["is_imputed"]]
 
     # Convert to percentage for readability (0.01 → 1.0%)
     fig2.add_trace(go.Scatter(
@@ -496,22 +417,6 @@ for region, colour in [("GS", COL_GS), ("ROM", COL_ROM)]:
             "Cancelled: %{y:.2f}%<extra></extra>"
         )
     ))
-
-    # if show_imputed and not imputed_rows.empty:
-    #     bridge = pd.concat([real_rows.tail(1), imputed_rows])
-    #     fig2.add_trace(go.Scatter(
-    #         x=bridge["Month"],
-    #         y=bridge["% of services cancelled"] * 100,
-    #         mode="lines",
-    #         name=f"{region} (projected)",
-    #         line=dict(color=colour, width=2, dash="dash"),
-    #         opacity=0.5,
-    #         hovertemplate=(
-    #             f"<b>{region} — projected</b><br>"
-    #             "Month: %{x|%b %Y}<br>"
-    #             "Cancelled: %{y:.2f}%<extra></extra>"
-    #         )
-    #     ))
 
 fig2.update_layout(
     yaxis_title="% of Services Cancelled",
