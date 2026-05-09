@@ -208,7 +208,7 @@ COL_ROM     = "#E87722"   # Orange    → Outer Metropolitan
 # because they all read from the same filtered dataframe.
 # ============================================================
 with st.sidebar:
-    st.markdown("## 🔍 Filters")
+    st.markdown("## Filters")
     st.markdown("Use these controls to explore the data. All charts update instantly.")
     st.markdown("---")
 
@@ -221,7 +221,7 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.markdown("### 📌 About this dashboard")
+    st.markdown("### About this dashboard")
     st.markdown("""
     This dashboard explores **bus service reliability** across NSW and the impact on
     riders who depend on buses the most.
@@ -257,7 +257,7 @@ else:
 
 st.markdown("""
 <h1 style='color:#1B5E96; margin-bottom:4px'>
-    🚌 Where Sydney's Bus Reliability Problems Hurt Riders Most
+    Where Sydney's Bus Reliability Problems Hurt Riders Most
 </h1>
 <p style='color:#555; font-size:17px; margin-top:2px'>
     A data story about outer metropolitan communities left behind by unreliable bus services
@@ -317,7 +317,7 @@ Together, these two regions paint a picture of a network under pressure, where t
 # ── LAYER 1: SERVICE RELIABILITY ────────────────────────────
 # ============================================================
 st.markdown("---")
-st.markdown("<div class='section-header'>📊 Layer 1 — How Reliable Are the Buses?</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-header'>Layer 1 — How Reliable Are the Buses?</div>", unsafe_allow_html=True)
 
 st.markdown("""
 <div class='narrative-box'>
@@ -330,7 +330,7 @@ The TfNSW target is <b>95% on-time running</b> — shown as a red dashed line be
 
 
 # ── CHART 1: OTR over time ──────────────────────────────────
-st.markdown("#### 📈 On-Time Running Rate Over Time")
+st.markdown("#### On-Time Running Rate Over Time")
 
 fig1 = go.Figure()
 
@@ -389,7 +389,7 @@ st.plotly_chart(fig1, use_container_width=True, theme = None)
 
 
 # ── CHART 2: Cancellation rate over time ────────────────────
-st.markdown("#### ❌ Cancellation Rate Over Time")
+st.markdown("#### Cancellation Rate Over Time")
 
 fig2 = go.Figure()
 
@@ -440,7 +440,7 @@ st.plotly_chart(fig2, use_container_width=True, theme = None)
 # Narrative bridge between charts — scrollytelling in action
 st.markdown("""
 <div class='narrative-box'>
-💡 <b>What's driving cancellations?</b> A major structural cause is driver shortages.
+<b>What's driving cancellations?</b> A major structural cause is driver shortages.
 Greater Sydney has consistently had <b>hundreds of unfilled driver positions</b> every month.
 When there's no driver, the bus simply does not run.
 </div>
@@ -448,7 +448,7 @@ When there's no driver, the bus simply does not run.
 
 
 # ── CHART 3: Driver Vacancies ────────────────────────────────
-st.markdown("#### 🧑‍✈️ Driver Vacancies by Region (Monthly)")
+st.markdown("#### Driver Vacancies by Region (Monthly)")
 
 fig3 = go.Figure()
 
@@ -493,7 +493,7 @@ st.plotly_chart(fig3, use_container_width=True, theme = None)
 # ── LAYER 2: RIDER DEMAND ────────────────────────────────────
 # ============================================================
 st.markdown("---")
-st.markdown("<div class='section-header'>🧑‍🤝‍🧑 Layer 2 — Who's Riding, and Who Can't Afford a Bus Not Showing Up?</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-header'>Layer 2 — Who's Riding, and Who Can't Afford a Bus Not Showing Up?</div>", unsafe_allow_html=True)
 
 st.markdown("""
 <div class='narrative-box'>
@@ -506,7 +506,7 @@ When their bus is cancelled or late, they wait. Or they miss the appointment.
 
 
 # ── CHART 4: Opal trips over time (area chart) ──────────────
-st.markdown("#### 🗓️ Monthly Bus Trips by Passenger Type (All NSW)")
+st.markdown("#### Monthly Bus Trips by Passenger Type (All NSW)")
 
 TOP_CARDS = [
     "CTP (Community Transport)",
@@ -555,7 +555,7 @@ st.plotly_chart(fig4, use_container_width=True, theme=None)
 
 
 # ── CHART 5: Donut + insight text side by side ──────────────
-st.markdown("#### 🥧 Who Takes the Most Bus Trips? (2024–2026 total)")
+st.markdown("#### Who Takes the Most Bus Trips? (2024–2026 total)")
 
 col_pie, col_insight = st.columns([1, 1])
 
@@ -609,7 +609,7 @@ with col_insight:
 # scenarios and see the estimated impact in real time.
 # ============================================================
 st.markdown("---")
-st.markdown("<div class='section-header'>🔮 What Next — Modelling the Impact of Improvement</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-header'>What Next — Modelling the Impact of Improvement</div>", unsafe_allow_html=True)
 
 st.markdown("""
 <div class='narrative-box'>
@@ -708,7 +708,7 @@ st.markdown("""
     border-radius: 12px;
     margin-top: 10px;
 '>
-    <h2 style='color:white; margin-top:0'>📢 The Ask: Prioritise Where It Hurts Most</h2>
+    <h2 style='color:white; margin-top:0'>The Ask: Prioritise Where It Hurts Most</h2>
     <p style='font-size:16px; line-height:1.8; opacity:0.95'>
         Greater Sydney carries the heaviest cancellation burden and the most severe driver shortages —
         while its riders include hundreds of thousands of CTP, Senior, and School Student passengers
