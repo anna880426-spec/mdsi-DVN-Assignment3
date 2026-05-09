@@ -213,6 +213,19 @@ def load_data():
 
     return perf, opal
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_all_modes():
+    """Cross-modal Opal trips (Bus / Train / Light Rail / Metro / Ferry) since 2024."""
+    df = pd.read_csv("all_modes.csv")
+    # Some rows ship lowercase ("bus", "train") — normalise so the same mode
+    # doesn't show up twice in groupbys/legends.
+    df["Travel_Mode"] = df["Travel_Mode"].astype(str).str.strip().str.title()
+    df["Year_Month"] = pd.to_datetime(df["Year_Month"], format="%b-%Y", errors="coerce")
+    df = df.dropna(subset=["Year_Month"])
+    df = df[df["Year_Month"] >= "2024-01-01"].copy()
+    df = df[df["Travel_Mode"].isin(["Bus", "Train", "Light Rail", "Metro", "Ferry"])]
+    return df
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_bus_alerts(api_key):
     url = 'https://api.transport.nsw.gov.au/v2/gtfs/alerts/buses'
@@ -266,6 +279,7 @@ def find_stop_name(code):
 # Actually call the function to get our data
 perf, opal = load_data()
 routes_df, stops_df = load_static_data()
+all_modes = load_all_modes()
 
 # ============================================================
 # STEP 4: COLOUR PALETTE
@@ -920,6 +934,122 @@ with col_insight:
 
 
 # ============================================================
+# ── LAYER 2b: CROSS-MODAL DEMAND ─────────────────────────────
+# Layer 2 showed *who* rides the bus. This layer asks whether
+# the people with options are quietly leaving. The all_modes
+# dataset (Bus / Train / Light Rail / Metro / Ferry, 2017–2025)
+# lets us compare bus ridership against alternative modes over
+# the same window covered by Layer 1's reliability charts.
+# Ferry is excluded from the chart because its volume is an
+# order of magnitude smaller and would flatten the others.
+# ============================================================
+st.markdown("---")
+st.markdown("<div class='section-header'>Layer 2b — Is the Bus Losing Riders?</div>", unsafe_allow_html=True)
+
+st.markdown("""
+<div class='narrative-box'>
+<b>Are riders abandoning the bus?</b> If bus reliability is declining, passengers with alternatives may be shifting
+to trains or light rail. The chart below compares monthly ridership trends across transport modes.
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown("#### Monthly Trips by Transport Mode (2024 onwards)")
+
+# Aggregate across all card types so each line is total trips per mode per month
+modes_agg = (
+    all_modes[all_modes["Travel_Mode"] != "Ferry"]
+    .groupby(["Year_Month", "Travel_Mode"], as_index=False)["Trip"]
+    .sum()
+)
+
+# Bus / Train get the brand colours; Light Rail and Metro use grey tones so
+# the eye is drawn to the headline comparison without losing the alternatives.
+MODE_COLOURS = {
+    "Bus":        COL_GS,
+    "Train":      COL_ROM,
+    "Light Rail": "#888888",
+    "Metro":      "#BBBBBB",
+}
+mode_order = ["Bus", "Train", "Light Rail", "Metro"]
+
+fig_modes = go.Figure()
+for mode in mode_order:
+    sub = modes_agg[modes_agg["Travel_Mode"] == mode].sort_values("Year_Month")
+    if sub.empty:
+        continue
+    fig_modes.add_trace(go.Scatter(
+        x=sub["Year_Month"],
+        y=sub["Trip"],
+        mode="lines+markers",
+        name=mode,
+        line=dict(color=MODE_COLOURS[mode], width=2.5),
+        marker=dict(size=5),
+        hovertemplate=(
+            f"<b>{mode}</b><br>"
+            "Month: %{x|%b %Y}<br>"
+            "Trips: %{y:,.0f}<extra></extra>"
+        ),
+    ))
+
+fig_modes.update_layout(
+    yaxis=dict(title="Monthly Trips", tickformat=".2s", automargin=True),
+    xaxis=dict(title="Month", automargin=True),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    plot_bgcolor="white",
+    paper_bgcolor="white",
+    height=380,
+    margin=dict(t=10, b=20, l=10, r=10),
+    font_color="black",
+)
+fig_modes.update_xaxes(showgrid=False)
+fig_modes.update_yaxes(showgrid=False)
+
+st.plotly_chart(fig_modes, use_container_width=True, theme=None)
+
+# Insight: compare the first vs last 3 months of the window so a single
+# anomalous month can't flip the headline number.
+_modes_pivot = modes_agg.pivot(index="Year_Month", columns="Travel_Mode", values="Trip").sort_index()
+_first_3 = _modes_pivot.head(3).mean()
+_last_3  = _modes_pivot.tail(3).mean()
+_pct = ((_last_3 - _first_3) / _first_3 * 100).to_dict()
+
+_bus_pct = _pct.get("Bus", 0.0)
+_train_pct = _pct.get("Train", 0.0)
+_lr_pct = _pct.get("Light Rail", 0.0)
+_metro_pct = _pct.get("Metro", 0.0)
+
+def _verb(p): return "grew" if p >= 0 else "declined"
+_window_start = _modes_pivot.index.min().strftime("%b %Y")
+_window_end   = _modes_pivot.index.max().strftime("%b %Y")
+
+# Headline framing depends on whether bus underperformed the rail alternatives.
+# We compare bus growth against the average of train and light rail (excluding
+# metro, whose growth is dominated by network expansion rather than mode-switch).
+_rail_avg = (_train_pct + _lr_pct) / 2
+if _bus_pct < _rail_avg:
+    _headline = (
+        "<b>The riders with alternatives are voting with their feet.</b> "
+        "Bus growth is lagging the rail network — the people who can switch are switching, "
+        "leaving an even higher concentration of dependent riders on the bus."
+    )
+else:
+    _headline = (
+        "<b>The bus network is holding its own — for now.</b> "
+        "Bus ridership is keeping pace with rail alternatives, but Layer 1's reliability decline "
+        "is a leading indicator: if cancellations keep rising, riders with options will start moving."
+    )
+
+st.markdown(f"""
+<div class='narrative-box'>
+{_headline}
+Between {_window_start} and {_window_end}, bus trips <b>{_verb(_bus_pct)} {abs(_bus_pct):.1f}%</b>
+while train trips <b>{_verb(_train_pct)} {abs(_train_pct):.1f}%</b>
+(light rail {_verb(_lr_pct)} {abs(_lr_pct):.1f}%, metro {_verb(_metro_pct)} {abs(_metro_pct):.1f}%).
+</div>
+""", unsafe_allow_html=True)
+
+
+# ============================================================
 # ── WHAT NEXT: WHAT-IF PARAMETERISATION ─────────────────────
 #
 # ADVANCED FEATURE #2: What-If Parameterisation
@@ -1045,8 +1175,17 @@ if show_live:
     st.markdown("<div class='section-header'> Layer 4 — Real time alerts </div>", unsafe_allow_html=True)
     data = fetch_bus_alerts(API_KEY)
 
-    #Find usable stats from data
-    for entity in data:
+    # Paginate so the page doesn't stretch on with 40+ alerts.
+    # Session-state holds the current visible count; the button below
+    # either reveals 5 more or collapses back to the initial 5.
+    ALERT_PAGE = 5
+    if "alert_count" not in st.session_state:
+        st.session_state.alert_count = ALERT_PAGE
+
+    total_alerts = len(data)
+    visible = min(st.session_state.alert_count, total_alerts)
+
+    for entity in data[:visible]:
         with st.expander(f"Alert: {entity['header'][:100]}..."):
             st.write(f"**Description:** {entity['desc']}")
 
@@ -1063,6 +1202,19 @@ if show_live:
                 start = datetime.fromtimestamp(period['start']).strftime('%Y-%m-%d %H:%M') if period['start'] else "Unknown"
                 end = datetime.fromtimestamp(period['end']).strftime('%Y-%m-%d %H:%M') if period['end'] else "Until further notice"
                 st.caption(f"📅 Active from {start} to {end}")
+
+    if total_alerts > ALERT_PAGE:
+        st.caption(f"Showing {visible} of {total_alerts} alerts")
+        if visible >= total_alerts:
+            if st.button("Show less", key="alerts_show_less"):
+                st.session_state.alert_count = ALERT_PAGE
+                st.rerun()
+        else:
+            remaining = total_alerts - visible
+            label = f"Show more alerts ({min(ALERT_PAGE, remaining)} more)"
+            if st.button(label, key="alerts_show_more"):
+                st.session_state.alert_count = min(visible + ALERT_PAGE, total_alerts)
+                st.rerun()
 
 
 # Footer
