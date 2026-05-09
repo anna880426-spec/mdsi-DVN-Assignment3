@@ -16,6 +16,7 @@ import plotly.graph_objects as go  # For building interactive charts
 import plotly.express as px # Simpler chart-building on top of plotly
 
 import pydeck as pdk
+import json
 
 import os
 from dotenv import load_dotenv
@@ -100,6 +101,86 @@ def load_static_data():
     r_df = pd.read_csv('routes.txt', dtype={'route_short_name': str, 'agency_id': str})
     s_df = pd.read_csv('stops.txt', dtype={'stop_id': str})
     return r_df, s_df
+
+# ---- Layer 3 (spatial map) loaders --------------------------
+# These two functions feed the choropleth + stop-cloud map.
+# They are cached for a day so the map renders instantly on
+# subsequent reruns and the heavy stops.txt only parses once.
+# -------------------------------------------------------------
+
+# Map TfNSW contract codes to the GS / ROM buckets used elsewhere
+# in the dashboard. "Freezone" overlays and unknowns are excluded.
+REGION_MAP = {
+    "GSBC":  "GS",   # Greater Sydney Bus Contracts
+    "MBSC":  "GS",   # Metropolitan Bus Service Contract
+    "OMBSC": "ROM",  # Outer Metropolitan Bus Service Contract
+    "RURAL": "ROM",  # Rural zone
+}
+
+def _region_bucket(regiontype):
+    return REGION_MAP.get((regiontype or "").upper())
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_bus_contract_geojson():
+    """NSW bus contract regions (36 polygons; regiontype maps to GS / ROM via REGION_MAP)."""
+    with open("bus_contract.geojson", "r", encoding="utf-8") as f:
+        return json.load(f)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_map_stops(max_points=5000):
+    """Load GTFS stops, restrict to the Sydney area, tag each by contract region, sample."""
+    s_df = pd.read_csv(
+        "stops.txt",
+        dtype={"stop_id": str},
+        usecols=["stop_id", "stop_name", "stop_lat", "stop_lon"],
+    )
+    s_df["stop_lat"] = pd.to_numeric(s_df["stop_lat"], errors="coerce")
+    s_df["stop_lon"] = pd.to_numeric(s_df["stop_lon"], errors="coerce")
+    s_df = s_df.dropna(subset=["stop_lat", "stop_lon"])
+    # Sydney bbox: keeps the map focused and removes far-flung non-bus stops
+    s_df = s_df[
+        s_df["stop_lat"].between(-34.2, -33.4)
+        & s_df["stop_lon"].between(150.5, 151.5)
+    ].copy()
+
+    # Build a bounding box per GS/ROM bucket from the contract polygons.
+    # Bbox classification is a deliberate approximation near boundaries —
+    # it avoids a shapely dependency and runs in milliseconds. GS is tested
+    # first because the GS polygons sit inside the broader ROM footprint.
+    geojson = load_bus_contract_geojson()
+    bboxes = {"GS":  [90.0, -90.0, 180.0, -180.0],
+              "ROM": [90.0, -90.0, 180.0, -180.0]}
+    for feat in geojson["features"]:
+        bucket = _region_bucket((feat.get("properties") or {}).get("regiontype"))
+        if bucket is None:
+            continue
+        bb = bboxes[bucket]
+        stack = [feat["geometry"]["coordinates"]]
+        while stack:
+            x = stack.pop()
+            if isinstance(x, list) and x and isinstance(x[0], (int, float)):
+                lo, la = x[0], x[1]
+                if la < bb[0]: bb[0] = la
+                if la > bb[1]: bb[1] = la
+                if lo < bb[2]: bb[2] = lo
+                if lo > bb[3]: bb[3] = lo
+            elif isinstance(x, list):
+                stack.extend(x)
+
+    def _classify(lat, lon):
+        for bucket in ("GS", "ROM"):
+            mn_la, mx_la, mn_lo, mx_lo = bboxes[bucket]
+            if mn_la <= lat <= mx_la and mn_lo <= lon <= mx_lo:
+                return bucket
+        return "UNKNOWN"
+
+    s_df["region"] = [_classify(la, lo) for la, lo in zip(s_df["stop_lat"], s_df["stop_lon"])]
+
+    # Sample so pydeck stays smooth even on slower machines
+    if len(s_df) > max_points:
+        s_df = s_df.sample(n=max_points, random_state=42)
+    return s_df.reset_index(drop=True)
+
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_data():
@@ -599,6 +680,112 @@ with col_insight:
     <b>When their bus doesn't show up, there is no Plan B.</b>
     </div>
     """, unsafe_allow_html=True)
+
+
+# ============================================================
+# ── LAYER 3: SPATIAL DISTRIBUTION ───────────────────────────
+# A pydeck map combining two layers:
+#   1) Bus contract region polygons coloured by GS vs ROM
+#   2) A sampled cloud of GTFS bus stops (≤5,000 dots)
+# Both layers respect the sidebar region filter so the user
+# can isolate one region at a time.
+# ============================================================
+st.markdown("---")
+st.markdown("<div class='section-header'>Layer 3 — Where Are the Buses?</div>", unsafe_allow_html=True)
+
+st.markdown("""
+<div class='narrative-box'>
+This map shows the geographic spread of Sydney's bus network across the
+<b>GS (Greater Sydney)</b> and <b>ROM (Outer Metropolitan)</b> contract regions.
+Each polygon is one of the 36 contracted operating areas; each dot is an individual bus stop.
+Use the region filter in the sidebar to focus on a single region — the boundary fill
+and the stops update together.
+</div>
+""", unsafe_allow_html=True)
+
+# Load (cached) and apply the sidebar filter
+geojson_data = load_bus_contract_geojson()
+map_stops    = load_map_stops(max_points=5000)
+
+if selected_region == "GS – Greater Sydney":
+    region_filter = {"GS"}
+elif selected_region == "ROM – Outer Metropolitan":
+    region_filter = {"ROM"}
+else:
+    region_filter = {"GS", "ROM"}
+
+# Filter polygons to the selected region(s) and tag each with a fill colour
+# that pydeck's GeoJsonLayer can read directly via "properties._fill".
+def _hex_to_rgb(h):
+    h = h.lstrip("#")
+    return [int(h[i:i + 2], 16) for i in (0, 2, 4)]
+
+GS_FILL  = _hex_to_rgb(COL_GS)  + [70]   # last value = alpha (0–255), kept low for transparency
+ROM_FILL = _hex_to_rgb(COL_ROM) + [70]
+
+filtered_features = []
+for feat in geojson_data["features"]:
+    bucket = _region_bucket((feat.get("properties") or {}).get("regiontype"))
+    if bucket not in region_filter:
+        continue
+    # Don't mutate the cached object — copy the feature first
+    new_feat = dict(feat)
+    new_feat["properties"] = dict(feat.get("properties") or {})
+    new_feat["properties"]["_fill"] = GS_FILL if bucket == "GS" else ROM_FILL
+    new_feat["properties"]["_bucket"] = bucket
+    filtered_features.append(new_feat)
+
+filtered_geojson = {"type": "FeatureCollection", "features": filtered_features}
+
+# Filter stops to the selected region(s) and pre-compute per-row RGB values
+stops_view = map_stops[map_stops["region"].isin(region_filter)].copy()
+gs_rgb  = _hex_to_rgb(COL_GS)
+rom_rgb = _hex_to_rgb(COL_ROM)
+stops_view["fill_r"] = [gs_rgb[0] if r == "GS" else rom_rgb[0] for r in stops_view["region"]]
+stops_view["fill_g"] = [gs_rgb[1] if r == "GS" else rom_rgb[1] for r in stops_view["region"]]
+stops_view["fill_b"] = [gs_rgb[2] if r == "GS" else rom_rgb[2] for r in stops_view["region"]]
+
+polygon_layer = pdk.Layer(
+    "GeoJsonLayer",
+    data=filtered_geojson,
+    stroked=True,
+    filled=True,
+    get_fill_color="properties._fill",
+    get_line_color=[80, 80, 80],
+    line_width_min_pixels=1,
+    pickable=True,
+)
+
+stops_layer = pdk.Layer(
+    "ScatterplotLayer",
+    data=stops_view,
+    get_position="[stop_lon, stop_lat]",
+    get_fill_color="[fill_r, fill_g, fill_b, 170]",
+    get_radius=40,
+    radius_min_pixels=2,
+    radius_max_pixels=4,
+    pickable=False,
+)
+
+view_state = pdk.ViewState(latitude=-33.85, longitude=151.05, zoom=8.4, pitch=0)
+
+st.pydeck_chart(
+    pdk.Deck(
+        map_provider="carto",
+        map_style="light",
+        layers=[polygon_layer, stops_layer],
+        initial_view_state=view_state,
+        tooltip={"html": "<b>Contract:</b> {contract}<br/><b>Region:</b> {_bucket}"},
+    ),
+    use_container_width=True,
+    height=500,
+)
+
+st.caption(
+    f"Showing {len(filtered_features)} contract polygon(s) and {len(stops_view):,} bus stops "
+    "(sampled from a Sydney-area subset of GTFS stops.txt). Stop-to-region tagging uses "
+    "polygon bounding boxes — accurate away from boundaries, approximate at the edges."
+)
 
 
 # ============================================================
