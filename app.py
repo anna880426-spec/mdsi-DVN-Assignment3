@@ -301,6 +301,8 @@ with st.sidebar:
         help="GS = Greater Sydney | ROM = Outer Metropolitan (Blue Mountains, Hunter, Illawarra, etc.)"
     )
 
+    show_live = st.toggle('Show live alerts', value=True)
+
     st.markdown("---")
     st.markdown("### About this dashboard")
     st.markdown("""
@@ -456,11 +458,11 @@ fig1.update_layout(
     xaxis= dict(automargin = True),
     xaxis_title="Month",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    plot_bgcolor="#0F1117",
-    paper_bgcolor="#0F1117",
+    plot_bgcolor="white",
+    paper_bgcolor="white",
     height=380,
     margin=dict(t=10, b=20, l=10, r=10),
-    font_color="white"
+    font_color="black"
 )
 
 fig1.update_xaxes(showgrid = False)
@@ -505,11 +507,11 @@ fig2.update_layout(
     xaxis_title="Month",
     xaxis= dict(automargin = True),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    plot_bgcolor="#0F1117",
-    paper_bgcolor="#0F1117",
+    plot_bgcolor="white",
+    paper_bgcolor="white",
     height=350,
     margin=dict(t=10, b=20, l=10, r=10),
-    font_color = "white",
+    font_color = "black",
 )
 fig2.update_xaxes(showgrid = False)
 fig2.update_yaxes(showgrid = False)
@@ -558,14 +560,14 @@ fig3.update_layout(
     xaxis_title="Month",
     xaxis_automargin = True,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    plot_bgcolor="#0F1117",
-    paper_bgcolor="#0F1117",
+    plot_bgcolor="white",
+    paper_bgcolor="white",
     height=350,
     margin=dict(t=10, b=20, l=10, r=10),
-    font_color = "white"
+    font_color = "black"
 )
 
-fig3.update_yaxes(color = "white")
+fig3.update_yaxes(color = "black")
 
 st.plotly_chart(fig3, use_container_width=True, theme = None)
 
@@ -853,15 +855,15 @@ fig4 = px.area(
     },
 )
 fig4.update_layout(
-    plot_bgcolor="#0F1117",
+    plot_bgcolor="white",
     yaxis_automargin = True,
     xaxis_automargin = True,
-    paper_bgcolor="#0F1117",
+    paper_bgcolor="white",
     height=380,
     yaxis_tickformat=".2s",   # e.g. 20M instead of 20,000,000
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     margin=dict(t=10, b=20, l=10, r=10),
-    font_color = "white"
+    font_color = "black"
 )
 fig4.update_traces(
     hovertemplate="<b>%{fullData.name}</b><br>Month: %{x|%b %Y}<br>Trips: %{y:,.0f}<extra></extra>"
@@ -895,11 +897,11 @@ with col_pie:
     )
     fig5.update_layout(
         showlegend=False,
-        plot_bgcolor="#0F1117",
-        paper_bgcolor="#0F1117",
+        plot_bgcolor="white",
+        paper_bgcolor="white",
         height=380,
         margin=dict(t=5, b=60, l=10, r=10),
-        font_color = "white"
+        font_color = "black"
     )
     st.plotly_chart(fig5, use_container_width=True, theme=None)
 
@@ -1039,27 +1041,28 @@ st.markdown("""
     </p>
 </div>
 """, unsafe_allow_html=True)
-st.markdown("<div class='section-header'> Layer 4 — Real time alerts </div>", unsafe_allow_html=True)
-data = fetch_bus_alerts(API_KEY)
+if show_live:
+    st.markdown("<div class='section-header'> Layer 4 — Real time alerts </div>", unsafe_allow_html=True)
+    data = fetch_bus_alerts(API_KEY)
 
-#Find usable stats from data
-for entity in data:
-    with st.expander(f"Alert: {entity['header'][:100]}..."):
-        st.write(f"**Description:** {entity['desc']}")
-        
-        # Routes Affected
-        st.markdown("---")
-        st.subheader("Affected Services")
-        for route_id in entity['route_ids']:
-            short, long = find_route_name(route_id)
-            st.info(f"**Route {short}:** {long}")
-        for stop_id in entity['stop_ids']:
-            st.info(f"**Stop: {find_stop_name(stop_id)}**")
-        # Dates
-        for period in entity['active_periods']:
-            start = datetime.fromtimestamp(period['start']).strftime('%Y-%m-%d %H:%M') if period['start'] else "Unknown"
-            end = datetime.fromtimestamp(period['end']).strftime('%Y-%m-%d %H:%M') if period['end'] else "Until further notice"
-            st.caption(f"📅 Active from {start} to {end}")
+    #Find usable stats from data
+    for entity in data:
+        with st.expander(f"Alert: {entity['header'][:100]}..."):
+            st.write(f"**Description:** {entity['desc']}")
+
+            # Routes Affected
+            st.markdown("---")
+            st.subheader("Affected Services")
+            for route_id in entity['route_ids']:
+                short, long = find_route_name(route_id)
+                st.info(f"**Route {short}:** {long}")
+            for stop_id in entity['stop_ids']:
+                st.info(f"**Stop: {find_stop_name(stop_id)}**")
+            # Dates
+            for period in entity['active_periods']:
+                start = datetime.fromtimestamp(period['start']).strftime('%Y-%m-%d %H:%M') if period['start'] else "Unknown"
+                end = datetime.fromtimestamp(period['end']).strftime('%Y-%m-%d %H:%M') if period['end'] else "Until further notice"
+                st.caption(f"📅 Active from {start} to {end}")
 
 
 # Footer
