@@ -700,9 +700,17 @@ if not alert_points.empty:
     )
     map_layers.append(alert_layer)
 
-# Legend — explains the three dot colours on the map below
-st.markdown(
-    """
+# Two-column layout: map on the left, region comparison metrics on the right.
+# The right column ties the spatial view back to Layer 1's reliability numbers,
+# so the map becomes analytical rather than purely descriptive.
+perf_real = perf[~perf["is_imputed"]]
+
+map_col, metrics_col = st.columns([3, 2])
+
+with map_col:
+    # Legend — explains the three dot colours on the map below
+    st.markdown(
+        """
 <div style='display:flex; gap:22px; flex-wrap:wrap; font-size:13px;
             margin: 4px 0 8px 2px; color:#333;'>
     <span><span style='display:inline-block; width:11px; height:11px;
@@ -717,35 +725,84 @@ st.markdown(
         Current service disruptions (live alerts)</span>
 </div>
 """,
-    unsafe_allow_html=True,
-)
+        unsafe_allow_html=True,
+    )
 
-view_state = pdk.ViewState(latitude=-33.85, longitude=151.05, zoom=8.4, pitch=0)
+    view_state = pdk.ViewState(latitude=-33.85, longitude=151.05, zoom=8.4, pitch=0)
 
-st.pydeck_chart(
-    pdk.Deck(
-        map_provider="carto",
-        map_style="light",
-        layers=map_layers,
-        initial_view_state=view_state,
-        tooltip={"html": "<b>Contract:</b> {contract}<br/><b>Region:</b> {_bucket}"},
-    ),
-    use_container_width=True,
-    height=500,
-)
+    st.pydeck_chart(
+        pdk.Deck(
+            map_provider="carto",
+            map_style="light",
+            layers=map_layers,
+            initial_view_state=view_state,
+            tooltip={"html": "<b>Contract:</b> {contract}<br/><b>Region:</b> {_bucket}"},
+        ),
+        use_container_width=True,
+        height=500,
+    )
 
-alert_caption = (
-    f" {len(alert_points):,} live alert location(s) overlaid in red."
-    if not alert_points.empty
-    else (" Live-alert overlay unavailable (TRANSPORT_API_KEY not configured)."
-          if not API_KEY else " No active alerts with mapped stops right now.")
-)
-st.caption(
-    f"Showing {len(filtered_features)} contract polygon(s) and {len(stops_view):,} bus stops "
-    "(sampled from a Sydney-area subset of GTFS stops.txt). Stop-to-region tagging uses "
-    "polygon bounding boxes — accurate away from boundaries, approximate at the edges."
-    + alert_caption
-)
+    alert_caption = (
+        f" {len(alert_points):,} live alert location(s) overlaid in red."
+        if not alert_points.empty
+        else (" Live-alert overlay unavailable (TRANSPORT_API_KEY not configured)."
+              if not API_KEY else " No active alerts with mapped stops right now.")
+    )
+    st.caption(
+        f"Showing {len(filtered_features)} contract polygon(s) and {len(stops_view):,} bus stops "
+        "(sampled from a Sydney-area subset of GTFS stops.txt). Stop-to-region tagging uses "
+        "polygon bounding boxes — accurate away from boundaries, approximate at the edges."
+        + alert_caption
+    )
+
+with metrics_col:
+    def _show_region_metrics(region_code, region_label):
+        rdf = perf_real[perf_real["Region"] == region_code]
+        n_stops = int((stops_view["region"] == region_code).sum())
+        avg_cancel = rdf["% of services cancelled"].mean()
+        avg_vac = rdf["Driver Vacancies"].mean()
+        avg_compl = rdf["Complaints per 100K"].mean()
+        coverage_stress = (n_stops / avg_vac) if pd.notna(avg_vac) and avg_vac > 0 else float("nan")
+
+        st.markdown(f"**{region_label}**")
+        st.metric("Bus stops (sampled)", f"{n_stops:,}")
+        st.metric("Cancellation rate (avg)", f"{avg_cancel:.2%}")
+        st.metric("Driver vacancies (avg/month)", f"{avg_vac:.0f}")
+        st.metric("Complaints per 100K (avg)", f"{avg_compl:.1f}")
+        st.metric(
+            "Stops per driver vacancy",
+            "—" if pd.isna(coverage_stress) else f"{coverage_stress:,.1f}",
+            help="Sampled stops divided by avg unfilled driver positions — a coverage-stress proxy.",
+        )
+
+    if selected_region == "Both Regions":
+        gs_col, rom_col = st.columns(2)
+        with gs_col:
+            _show_region_metrics("GS", "Greater Sydney")
+        with rom_col:
+            _show_region_metrics("ROM", "Outer Metro")
+    elif selected_region == "GS – Greater Sydney":
+        _show_region_metrics("GS", "Greater Sydney")
+    else:
+        _show_region_metrics("ROM", "Outer Metropolitan")
+
+# Insight — full-width comparison sentence beneath the map and metrics.
+# Uses full GS vs ROM data so the takeaway reads consistently regardless
+# of which region is currently selected in the sidebar.
+_gs_stops_full = int((map_stops["region"] == "GS").sum())
+_rom_stops_full = int((map_stops["region"] == "ROM").sum())
+_gs_cancel = perf_real[perf_real["Region"] == "GS"]["% of services cancelled"].mean()
+_rom_cancel = perf_real[perf_real["Region"] == "ROM"]["% of services cancelled"].mean()
+_stops_ratio = (_gs_stops_full / _rom_stops_full) if _rom_stops_full else 0
+_cancel_ratio = (_gs_cancel / _rom_cancel) if _rom_cancel else 0
+
+st.markdown(f"""
+<div class='narrative-box'>
+<b>Density does not equal reliability.</b> Greater Sydney has roughly <b>{_stops_ratio:.1f}× more bus stops</b>
+than the Outer Metropolitan region, yet its cancellation rate is <b>{_cancel_ratio:.1f}× higher</b>
+({_gs_cancel:.2%} vs {_rom_cancel:.2%}).
+</div>
+""", unsafe_allow_html=True)
 
 
 # ============================================================
