@@ -1,7 +1,7 @@
 # ============================================================
 # Sydney Bus Reliability Dashboard
 # MDSI DVN Assignment 3 - Group Project
-#
+# 
 # BEGINNER'S GUIDE TO THIS FILE:
 # - Every section is explained in plain English
 # - Streamlit works top-to-bottom: whatever you write first
@@ -14,7 +14,23 @@ import streamlit as st          # The main library that builds the web app
 import pandas as pd             # For loading and working with our data
 import numpy as np              # For maths/calculations
 import plotly.graph_objects as go  # For building interactive charts
-import plotly.express as px     # Simpler chart-building on top of plotly
+import plotly.express as px # Simpler chart-building on top of plotly
+
+import urllib.request
+import json
+from pathlib import Path
+import pydeck as pdk
+
+import os
+from dotenv import load_dotenv
+import requests
+from google.transit import gtfs_realtime_pb2
+from datetime import datetime
+
+
+load_dotenv()
+
+API_KEY = os.getenv("TRANSPORT_API_KEY")
 
 # ============================================================
 # STEP 1: PAGE CONFIGURATION
@@ -46,6 +62,7 @@ st.markdown("""
         border-radius: 0 8px 8px 0;
         margin: 12px 0 20px 0;
         line-height: 1.7;
+        color: black;
     }
 
     /* Yellow warning box (for imputed data notice) */
@@ -56,6 +73,7 @@ st.markdown("""
         border-radius: 0 8px 8px 0;
         margin: 10px 0;
         font-size: 13px;
+        color: black;
     }
 
     /* Section heading style */
@@ -66,6 +84,7 @@ st.markdown("""
         margin-top: 30px;
         padding-bottom: 6px;
         border-bottom: 2px solid #1B5E96;
+        
     }
 </style>
 """, unsafe_allow_html=True)
@@ -79,7 +98,19 @@ st.markdown("""
 # it runs. Without it, the files would be re-read every
 # time the user clicks anything. With it, the app is fast.
 # ============================================================
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def test_load_geo_json(file_path):
+    with open(file_path, 'r') as f:
+        return json.load(f)
+
 @st.cache_data
+def load_static_data():
+    r_df = pd.read_csv('routes.txt', dtype={'route_short_name': str, 'agency_id': str})
+    s_df = pd.read_csv('stops.txt', dtype={'stop_id': str})
+    return r_df, s_df
+
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_data():
     # --- Bus Performance Data ---
     perf = pd.read_excel("busperformance_reports_feb26.xlsx", sheet_name="BusData")
@@ -110,9 +141,59 @@ def load_data():
 
     return perf, opal
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_bus_alerts(api_key):
+    url = 'https://api.transport.nsw.gov.au/v2/gtfs/alerts/buses'
+    headers = {
+        'Authorization': f'apikey {api_key}',
+        'Accept': 'application/x-google-protobuf'
+    }
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(response.content)
+        #Easier to cache a list
+        clean_data = []
+        for entity in feed.entity:
+            if entity.HasField('alert'):
+                alert = entity.alert
+                clean_data.append({
+                    "id": entity.id,
+                    "header": alert.header_text.translation[0].text if alert.header_text.translation else "No Header",
+                    "desc": alert.description_text.translation[0].text if alert.description_text.translation else "",
+                    "route_ids": [s.route_id for s in alert.informed_entity if s.HasField('route_id')],
+                    "stop_ids": [s.stop_id for s in alert.informed_entity if s.HasField('stop_id')],
+                    "active_periods": [{"start": p.start, "end": p.end} for p in alert.active_period]
+                })
+        return clean_data
+    except requests.exceptions.HTTPError as err:
+        print(f"HTTP Error: {err}")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    return []
+
+def find_route_name(code):
+    parts = code.split('_')
+    if len(parts) == 2:
+    #print(type(parts[0]), type(parts[1]))
+    #print(routes_df.loc[(routes_df["agency_id"] == parts[0]) & (routes_df["route_short_name"] == parts[1]), "route_long_name"])
+        results = routes_df.loc[(routes_df["agency_id"] == parts[0]) & (routes_df["route_short_name"] == parts[1]), "route_long_name"]
+        if len(results.values) > 0:
+            return parts[1], results.values[0]
+    return code, "Could not find code"
+
+def find_stop_name(code):
+    #print(code)
+    results = stops_df.loc[stops_df["stop_id"] == code, "stop_name"]
+    if len(results.values) > 0:
+        return results.values[0]
+    return code
 
 # Actually call the function to get our data
 perf, opal = load_data()
+routes_df, stops_df = load_static_data()
 
 # ============================================================
 # STEP 4: COLOUR PALETTE
@@ -121,7 +202,7 @@ perf, opal = load_data()
 # ============================================================
 COL_GS      = "#1B5E96"   # Deep blue → Greater Sydney
 COL_ROM     = "#E87722"   # Orange    → Outer Metropolitan
-COL_GREY    = "#AAAAAA"   # Grey      → projected/imputed data
+#COL_GREY    = "#AAAAAA"   # Grey      → projected/imputed data
 
 
 # ============================================================
@@ -149,11 +230,11 @@ with st.sidebar:
     )
 
     # Toggle to show/hide the imputed (estimated) data points
-    show_imputed = st.toggle(
-        "Show projected data (Mar–Jun 2026)",
-        value=True,
-        help="Values after Feb 2026 were estimated using regional averages — not real measurements."
-    )
+    # show_imputed = st.toggle(
+    #     "Show projected data (Mar–Jun 2026)",
+    #     value=True,
+    #     help="Values after Feb 2026 were estimated using regional averages — not real measurements."
+    # )
 
     st.markdown("---")
     st.markdown("### 📌 About this dashboard")
@@ -184,8 +265,8 @@ else:
     perf_f = perf.copy()
 
 # Further filter to hide imputed rows if the user toggled it off
-if not show_imputed:
-    perf_f = perf_f[~perf_f["is_imputed"]].copy()
+# if not show_imputed:
+#     perf_f = perf_f[~perf_f["is_imputed"]].copy()
 
 
 # ============================================================
@@ -193,6 +274,36 @@ if not show_imputed:
 # The title and four big "metric cards" at the very top.
 # These give the reader the headline numbers immediately.
 # ============================================================
+
+#Doesnt show all the data we want because we need the NSW data its too large.. -> though I do not know what data would be usefull to put on a map anyway..
+# try:
+#     geojson_data = test_load_geo_json('sydney_bus.geojson')
+
+#     geojson_layer = pdk.Layer(
+#         "GeoJsonLayer",
+#         geojson_data,
+#         opacity=0.5,
+#         stroked=True,
+#         filled=True,
+#         get_fill_color=[20, 30, 200],
+#         get_line_color=[255, 255, 255],
+#         line_width_min_pixels=1,
+#     )
+
+#     # Set the initial view
+#     view_state = pdk.ViewState(latitude=-33.8688, longitude=151.2093, zoom=10)
+
+#     # Render the map
+#     st.pydeck_chart(pdk.Deck(
+#         layers=[geojson_layer],
+#         initial_view_state=view_state,
+#         map_style='dark'
+#     ),
+#     width = 800
+#     )
+# except FileNotFoundError:
+#     st.error("Wrong file path")
+
 st.markdown("""
 <h1 style='color:#1B5E96; margin-bottom:4px'>
     🚌 Where Sydney's Bus Reliability Problems Hurt Riders Most
@@ -252,14 +363,14 @@ Together, these two regions paint a picture of a network under pressure, where t
 """, unsafe_allow_html=True)
 
 # Show the imputed data warning only when projected data is turned on
-if show_imputed:
-    st.markdown("""
-    <div class='imputed-warning'>
-    ⚠️ <b>Data transparency note:</b> Values from <b>March–June 2026</b> were <b>estimated using regional averages</b>
-    (mean imputation), not real measurements. They appear as dashed lines in the charts below.
-    Treat them as indicative projections, not confirmed data.
-    </div>
-    """, unsafe_allow_html=True)
+# if show_imputed:
+#     st.markdown("""
+#     <div class='imputed-warning'>
+#     ⚠️ <b>Data transparency note:</b> Values from <b>March–June 2026</b> were <b>estimated using regional averages</b>
+#     (mean imputation), not real measurements. They appear as dashed lines in the charts below.
+#     Treat them as indicative projections, not confirmed data.
+#     </div>
+#     """, unsafe_allow_html=True)
 
 
 # ============================================================
@@ -308,24 +419,23 @@ for region, colour in [("GS", COL_GS), ("ROM", COL_ROM)]:
             "OTR: %{y:.1%}<extra></extra>"
         )
     ))
-
     # Dashed line = imputed/projected data
-    if show_imputed and not imputed_rows.empty:
-        # Join the last real point to the first imputed so the line is continuous
-        bridge = pd.concat([real_rows.tail(1), imputed_rows])
-        fig1.add_trace(go.Scatter(
-            x=bridge["Month"],
-            y=bridge["OTR"],
-            mode="lines",
-            name=f"{region} (projected)",
-            line=dict(color=colour, width=2, dash="dash"),
-            opacity=0.55,
-            hovertemplate=(
-                f"<b>{region} — projected</b><br>"
-                "Month: %{x|%b %Y}<br>"
-                "OTR: %{y:.1%}<extra></extra>"
-            )
-        ))
+    # if show_imputed and not imputed_rows.empty:
+    #     # Join the last real point to the first imputed so the line is continuous
+    #     bridge = pd.concat([real_rows.tail(1), imputed_rows])
+    #     fig1.add_trace(go.Scatter(
+    #         x=bridge["Month"],
+    #         y=bridge["OTR"],
+    #         mode="lines",
+    #         name=f"{region} (projected)",
+    #         line=dict(color=colour, width=2, dash="dash"),
+    #         opacity=0.55,
+    #         hovertemplate=(
+    #             f"<b>{region} — projected</b><br>"
+    #             "Month: %{x|%b %Y}<br>"
+    #             "OTR: %{y:.1%}<extra></extra>"
+    #         )
+    #     ))
 
 # Red dotted reference line at 95% target
 fig1.add_hline(
@@ -339,16 +449,21 @@ fig1.add_hline(
 )
 
 fig1.update_layout(
-    yaxis=dict(tickformat=".0%", title="On-Time Running Rate", range=[0.88, 1.0]),
+    yaxis=dict(tickformat=".0%", title="On-Time Running Rate", range=[0.88, 1.0], automargin = True),
+    xaxis= dict(automargin = True),
     xaxis_title="Month",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    plot_bgcolor="white",
-    paper_bgcolor="white",
+    plot_bgcolor="#0F1117",
+    paper_bgcolor="#0F1117",
     height=380,
-    margin=dict(t=10, b=20, l=10, r=10)
+    margin=dict(t=10, b=20, l=10, r=10),
+    font_color="white"
 )
 
-st.plotly_chart(fig1, use_container_width=True)
+fig1.update_xaxes(showgrid = False)
+fig1.update_yaxes(showgrid = False)
+
+st.plotly_chart(fig1, use_container_width=True, theme = None)
 
 
 # ── CHART 2: Cancellation rate over time ────────────────────
@@ -382,33 +497,39 @@ for region, colour in [("GS", COL_GS), ("ROM", COL_ROM)]:
         )
     ))
 
-    if show_imputed and not imputed_rows.empty:
-        bridge = pd.concat([real_rows.tail(1), imputed_rows])
-        fig2.add_trace(go.Scatter(
-            x=bridge["Month"],
-            y=bridge["% of services cancelled"] * 100,
-            mode="lines",
-            name=f"{region} (projected)",
-            line=dict(color=colour, width=2, dash="dash"),
-            opacity=0.5,
-            hovertemplate=(
-                f"<b>{region} — projected</b><br>"
-                "Month: %{x|%b %Y}<br>"
-                "Cancelled: %{y:.2f}%<extra></extra>"
-            )
-        ))
+    # if show_imputed and not imputed_rows.empty:
+    #     bridge = pd.concat([real_rows.tail(1), imputed_rows])
+    #     fig2.add_trace(go.Scatter(
+    #         x=bridge["Month"],
+    #         y=bridge["% of services cancelled"] * 100,
+    #         mode="lines",
+    #         name=f"{region} (projected)",
+    #         line=dict(color=colour, width=2, dash="dash"),
+    #         opacity=0.5,
+    #         hovertemplate=(
+    #             f"<b>{region} — projected</b><br>"
+    #             "Month: %{x|%b %Y}<br>"
+    #             "Cancelled: %{y:.2f}%<extra></extra>"
+    #         )
+    #     ))
 
 fig2.update_layout(
     yaxis_title="% of Services Cancelled",
+    yaxis_automargin = True,
     xaxis_title="Month",
+    xaxis= dict(automargin = True),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    plot_bgcolor="white",
-    paper_bgcolor="white",
+    plot_bgcolor="#0F1117",
+    paper_bgcolor="#0F1117",
     height=350,
-    margin=dict(t=10, b=20, l=10, r=10)
+    margin=dict(t=10, b=20, l=10, r=10),
+    font_color = "white",
 )
+fig2.update_xaxes(showgrid = False)
+fig2.update_yaxes(showgrid = False)
 
-st.plotly_chart(fig2, use_container_width=True)
+st.plotly_chart(fig2, use_container_width=True, theme = None)
+
 
 
 # Narrative bridge between charts — scrollytelling in action
@@ -441,21 +562,26 @@ for region, colour in [("GS", COL_GS), ("ROM", COL_ROM)]:
             f"<b>{region}</b><br>"
             "Month: %{x|%b %Y}<br>"
             "Vacancies: %{y:.0f}<extra></extra>"
-        )
+        ),
     ))
 
 fig3.update_layout(
     barmode="group",
     yaxis_title="Unfilled Driver Positions",
+    yaxis_automargin = True,
     xaxis_title="Month",
+    xaxis_automargin = True,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    plot_bgcolor="white",
-    paper_bgcolor="white",
+    plot_bgcolor="#0F1117",
+    paper_bgcolor="#0F1117",
     height=350,
-    margin=dict(t=10, b=20, l=10, r=10)
+    margin=dict(t=10, b=20, l=10, r=10),
+    font_color = "white"
 )
 
-st.plotly_chart(fig3, use_container_width=True)
+fig3.update_yaxes(color = "white")
+
+st.plotly_chart(fig3, use_container_width=True, theme = None)
 
 
 # ============================================================
@@ -506,18 +632,21 @@ fig4 = px.area(
     },
 )
 fig4.update_layout(
-    plot_bgcolor="white",
-    paper_bgcolor="white",
+    plot_bgcolor="#0F1117",
+    yaxis_automargin = True,
+    xaxis_automargin = True,
+    paper_bgcolor="#0F1117",
     height=380,
     yaxis_tickformat=".2s",   # e.g. 20M instead of 20,000,000
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    margin=dict(t=10, b=20, l=10, r=10)
+    margin=dict(t=10, b=20, l=10, r=10),
+    font_color = "white"
 )
 fig4.update_traces(
     hovertemplate="<b>%{fullData.name}</b><br>Month: %{x|%b %Y}<br>Trips: %{y:,.0f}<extra></extra>"
 )
 
-st.plotly_chart(fig4, use_container_width=True)
+st.plotly_chart(fig4, use_container_width=True, theme=None)
 
 
 # ── CHART 5: Donut + insight text side by side ──────────────
@@ -545,12 +674,13 @@ with col_pie:
     )
     fig5.update_layout(
         showlegend=False,
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        height=320,
-        margin=dict(t=10, b=10, l=10, r=10)
+        plot_bgcolor="#0F1117",
+        paper_bgcolor="#0F1117",
+        height=380,
+        margin=dict(t=5, b=60, l=10, r=10),
+        font_color = "white"
     )
-    st.plotly_chart(fig5, use_container_width=True)
+    st.plotly_chart(fig5, use_container_width=True, theme=None)
 
 with col_insight:
     st.markdown("""
@@ -688,13 +818,34 @@ st.markdown("""
     </p>
 </div>
 """, unsafe_allow_html=True)
+st.markdown("<div class='section-header'> Layer 4 — Real time alerts </div>", unsafe_allow_html=True)
+data = fetch_bus_alerts(API_KEY)
+
+#Find usable stats from data
+for entity in data:
+    with st.expander(f"Alert: {entity['header'][:100]}..."):
+        st.write(f"**Description:** {entity['desc']}")
+        
+        # Routes Affected
+        st.markdown("---")
+        st.subheader("Affected Services")
+        for route_id in entity['route_ids']:
+            short, long = find_route_name(route_id)
+            st.info(f"**Route {short}:** {long}")
+        for stop_id in entity['stop_ids']:
+            st.info(f"**Stop: {find_stop_name(stop_id)}**")
+        # Dates
+        for period in entity['active_periods']:
+            start = datetime.fromtimestamp(period['start']).strftime('%Y-%m-%d %H:%M') if period['start'] else "Unknown"
+            end = datetime.fromtimestamp(period['end']).strftime('%Y-%m-%d %H:%M') if period['end'] else "Until further notice"
+            st.caption(f"📅 Active from {start} to {end}")
+
 
 # Footer
 st.markdown("""
 <br>
 <div style='color:#aaa; font-size:12px; text-align:center; padding-bottom:20px'>
     Data: Transport for NSW Bus Performance Reports & Opal Trip Data (2024–2026) &nbsp;|&nbsp;
-    MDSI DVN Assignment 3 &nbsp;|&nbsp; Built with Streamlit &nbsp;|&nbsp;
-    Projected values (Mar–Jun 2026) estimated via mean imputation by region
+    MDSI DVN Assignment 3 &nbsp;
 </div>
 """, unsafe_allow_html=True)
