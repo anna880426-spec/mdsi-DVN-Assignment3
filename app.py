@@ -88,9 +88,19 @@ def load_data():
     # Keep only 2024 onwards (as decided in our EDA)
     perf = perf[perf["Month"] >= "2024-01-01"].copy()
 
-    # Mark imputed rows: the "Most recent month" column is 1.0 for the
-    # last real data point (Feb 2026) and NaN for projected rows (Mar–Jun 2026)
-    perf["is_imputed"] = perf["Most recent month"].isna()
+    # Mark imputed rows: real data goes up to Feb 2026.
+    # Any row after that was estimated using regional averages (mean imputation).
+    perf["is_imputed"] = perf["Month"] > pd.Timestamp("2026-02-01")
+
+    # The imputed rows in the Excel file have NaN values (the fill wasn't saved).
+    # We compute regional means from real data and fill the NaN values here.
+    real_only = perf[~perf["is_imputed"]]
+    fill_cols = ["OTR", "% of services cancelled", "Untracked trips",
+    "Complaints per 100K", "Driver Vacancies"]
+    for region in ["GS", "ROM"]:
+        region_means = real_only[real_only["Region"] == region][fill_cols].mean()
+        mask = (perf["is_imputed"]) & (perf["Region"] == region)
+        perf.loc[mask, fill_cols] = perf.loc[mask, fill_cols].fillna(region_means)
 
     # --- Opal Trip Data (Demand Layer) ---
     opal = pd.read_csv("cleaned_df_bus.csv")
