@@ -571,6 +571,184 @@ st.plotly_chart(fig3, use_container_width=True, theme = None)
 
 
 # ============================================================
+# ── LAYER 3: SPATIAL DISTRIBUTION ───────────────────────────
+# A pydeck map combining two layers:
+#   1) Bus contract region polygons coloured by GS vs ROM
+#   2) A sampled cloud of GTFS bus stops (≤5,000 dots)
+# Both layers respect the sidebar region filter so the user
+# can isolate one region at a time.
+# ============================================================
+st.markdown("---")
+st.markdown("<div class='section-header'>Layer 3 — Where Are the Buses?</div>", unsafe_allow_html=True)
+
+st.markdown("""
+<div class='narrative-box'>
+Layer 1 showed that Greater Sydney has the worst cancellation rates and driver shortages. But where exactly is this happening?
+Outer Metropolitan areas face a different challenge: stops are sparse and spread across vast distances,
+meaning a single cancelled service can leave riders stranded with no nearby alternative.
+The map below shows this geographic reality — select a region in the sidebar to compare.
+</div>
+""", unsafe_allow_html=True)
+
+# Load (cached) and apply the sidebar filter
+geojson_data = load_bus_contract_geojson()
+map_stops    = load_map_stops(max_points=5000)
+
+if selected_region == "GS – Greater Sydney":
+    region_filter = {"GS"}
+elif selected_region == "ROM – Outer Metropolitan":
+    region_filter = {"ROM"}
+else:
+    region_filter = {"GS", "ROM"}
+
+# Filter polygons to the selected region(s) and tag each with a fill colour
+# that pydeck's GeoJsonLayer can read directly via "properties._fill".
+def _hex_to_rgb(h):
+    h = h.lstrip("#")
+    return [int(h[i:i + 2], 16) for i in (0, 2, 4)]
+
+GS_FILL  = _hex_to_rgb(COL_GS)  + [70]   # last value = alpha (0–255), kept low for transparency
+ROM_FILL = _hex_to_rgb(COL_ROM) + [70]
+
+filtered_features = []
+for feat in geojson_data["features"]:
+    bucket = _region_bucket((feat.get("properties") or {}).get("regiontype"))
+    if bucket not in region_filter:
+        continue
+    # Don't mutate the cached object — copy the feature first
+    new_feat = dict(feat)
+    new_feat["properties"] = dict(feat.get("properties") or {})
+    new_feat["properties"]["_fill"] = GS_FILL if bucket == "GS" else ROM_FILL
+    new_feat["properties"]["_bucket"] = bucket
+    filtered_features.append(new_feat)
+
+filtered_geojson = {"type": "FeatureCollection", "features": filtered_features}
+
+# Filter stops to the selected region(s) and pre-compute per-row RGB values
+stops_view = map_stops[map_stops["region"].isin(region_filter)].copy()
+gs_rgb  = _hex_to_rgb(COL_GS)
+rom_rgb = _hex_to_rgb(COL_ROM)
+stops_view["fill_r"] = [gs_rgb[0] if r == "GS" else rom_rgb[0] for r in stops_view["region"]]
+stops_view["fill_g"] = [gs_rgb[1] if r == "GS" else rom_rgb[1] for r in stops_view["region"]]
+stops_view["fill_b"] = [gs_rgb[2] if r == "GS" else rom_rgb[2] for r in stops_view["region"]]
+
+polygon_layer = pdk.Layer(
+    "GeoJsonLayer",
+    data=filtered_geojson,
+    stroked=True,
+    filled=True,
+    get_fill_color="properties._fill",
+    get_line_color=[80, 80, 80],
+    line_width_min_pixels=1,
+    pickable=True,
+)
+
+stops_layer = pdk.Layer(
+    "ScatterplotLayer",
+    data=stops_view,
+    get_position="[stop_lon, stop_lat]",
+    get_fill_color="[fill_r, fill_g, fill_b, 170]",
+    get_radius=40,
+    radius_min_pixels=2,
+    radius_max_pixels=4,
+    pickable=False,
+)
+
+# ---- Alert overlay (Layer 3 ↔ Layer 4 bridge) -----------------
+# Cross-reference the live-alert stop_ids with stops.txt so we can
+# plot active service disruptions on top of the bus-stop cloud.
+# Falls back gracefully (no extra layer) if the API key is missing
+# or the alerts feed returned nothing usable.
+alert_points = pd.DataFrame()
+if API_KEY:
+    layer3_alerts = fetch_bus_alerts(API_KEY)
+    alert_rows = []
+    for a in layer3_alerts:
+        for sid in a.get("stop_ids", []):
+            alert_rows.append({"stop_id": sid, "header": a.get("header", "")})
+    if alert_rows:
+        alert_points = (
+            pd.DataFrame(alert_rows)
+            .merge(
+                stops_df[["stop_id", "stop_name", "stop_lat", "stop_lon"]],
+                on="stop_id",
+                how="inner",
+            )
+        )
+        alert_points["stop_lat"] = pd.to_numeric(alert_points["stop_lat"], errors="coerce")
+        alert_points["stop_lon"] = pd.to_numeric(alert_points["stop_lon"], errors="coerce")
+        alert_points = alert_points.dropna(subset=["stop_lat", "stop_lon"])
+        # Keep the overlay inside the same Sydney bbox as the rest of the map
+        alert_points = alert_points[
+            alert_points["stop_lat"].between(-34.2, -33.4)
+            & alert_points["stop_lon"].between(150.5, 151.5)
+        ].reset_index(drop=True)
+
+map_layers = [polygon_layer, stops_layer]
+if not alert_points.empty:
+    alert_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=alert_points,
+        get_position="[stop_lon, stop_lat]",
+        get_fill_color=[231, 76, 60, 220],   # #E74C3C
+        get_line_color=[120, 20, 10, 230],
+        line_width_min_pixels=1,
+        get_radius=160,
+        radius_min_pixels=6,
+        radius_max_pixels=11,
+        pickable=False,
+    )
+    map_layers.append(alert_layer)
+
+# Legend — explains the three dot colours on the map below
+st.markdown(
+    """
+<div style='display:flex; gap:22px; flex-wrap:wrap; font-size:13px;
+            margin: 4px 0 8px 2px; color:#333;'>
+    <span><span style='display:inline-block; width:11px; height:11px;
+        background:#1B5E96; border-radius:50%; vertical-align:middle;
+        margin-right:4px;'></span>GS bus stops</span>
+    <span><span style='display:inline-block; width:11px; height:11px;
+        background:#E87722; border-radius:50%; vertical-align:middle;
+        margin-right:4px;'></span>ROM bus stops</span>
+    <span><span style='display:inline-block; width:13px; height:13px;
+        background:#E74C3C; border-radius:50%; vertical-align:middle;
+        margin-right:4px; box-shadow:0 0 0 1px #7a140a;'></span>
+        Current service disruptions (live alerts)</span>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+view_state = pdk.ViewState(latitude=-33.85, longitude=151.05, zoom=8.4, pitch=0)
+
+st.pydeck_chart(
+    pdk.Deck(
+        map_provider="carto",
+        map_style="light",
+        layers=map_layers,
+        initial_view_state=view_state,
+        tooltip={"html": "<b>Contract:</b> {contract}<br/><b>Region:</b> {_bucket}"},
+    ),
+    use_container_width=True,
+    height=500,
+)
+
+alert_caption = (
+    f" {len(alert_points):,} live alert location(s) overlaid in red."
+    if not alert_points.empty
+    else (" Live-alert overlay unavailable (TRANSPORT_API_KEY not configured)."
+          if not API_KEY else " No active alerts with mapped stops right now.")
+)
+st.caption(
+    f"Showing {len(filtered_features)} contract polygon(s) and {len(stops_view):,} bus stops "
+    "(sampled from a Sydney-area subset of GTFS stops.txt). Stop-to-region tagging uses "
+    "polygon bounding boxes — accurate away from boundaries, approximate at the edges."
+    + alert_caption
+)
+
+
+# ============================================================
 # ── LAYER 2: RIDER DEMAND ────────────────────────────────────
 # ============================================================
 st.markdown("---")
@@ -680,112 +858,6 @@ with col_insight:
     <b>When their bus doesn't show up, there is no Plan B.</b>
     </div>
     """, unsafe_allow_html=True)
-
-
-# ============================================================
-# ── LAYER 3: SPATIAL DISTRIBUTION ───────────────────────────
-# A pydeck map combining two layers:
-#   1) Bus contract region polygons coloured by GS vs ROM
-#   2) A sampled cloud of GTFS bus stops (≤5,000 dots)
-# Both layers respect the sidebar region filter so the user
-# can isolate one region at a time.
-# ============================================================
-st.markdown("---")
-st.markdown("<div class='section-header'>Layer 3 — Where Are the Buses?</div>", unsafe_allow_html=True)
-
-st.markdown("""
-<div class='narrative-box'>
-This map shows the geographic spread of Sydney's bus network across the
-<b>GS (Greater Sydney)</b> and <b>ROM (Outer Metropolitan)</b> contract regions.
-Each polygon is one of the 36 contracted operating areas; each dot is an individual bus stop.
-Use the region filter in the sidebar to focus on a single region — the boundary fill
-and the stops update together.
-</div>
-""", unsafe_allow_html=True)
-
-# Load (cached) and apply the sidebar filter
-geojson_data = load_bus_contract_geojson()
-map_stops    = load_map_stops(max_points=5000)
-
-if selected_region == "GS – Greater Sydney":
-    region_filter = {"GS"}
-elif selected_region == "ROM – Outer Metropolitan":
-    region_filter = {"ROM"}
-else:
-    region_filter = {"GS", "ROM"}
-
-# Filter polygons to the selected region(s) and tag each with a fill colour
-# that pydeck's GeoJsonLayer can read directly via "properties._fill".
-def _hex_to_rgb(h):
-    h = h.lstrip("#")
-    return [int(h[i:i + 2], 16) for i in (0, 2, 4)]
-
-GS_FILL  = _hex_to_rgb(COL_GS)  + [70]   # last value = alpha (0–255), kept low for transparency
-ROM_FILL = _hex_to_rgb(COL_ROM) + [70]
-
-filtered_features = []
-for feat in geojson_data["features"]:
-    bucket = _region_bucket((feat.get("properties") or {}).get("regiontype"))
-    if bucket not in region_filter:
-        continue
-    # Don't mutate the cached object — copy the feature first
-    new_feat = dict(feat)
-    new_feat["properties"] = dict(feat.get("properties") or {})
-    new_feat["properties"]["_fill"] = GS_FILL if bucket == "GS" else ROM_FILL
-    new_feat["properties"]["_bucket"] = bucket
-    filtered_features.append(new_feat)
-
-filtered_geojson = {"type": "FeatureCollection", "features": filtered_features}
-
-# Filter stops to the selected region(s) and pre-compute per-row RGB values
-stops_view = map_stops[map_stops["region"].isin(region_filter)].copy()
-gs_rgb  = _hex_to_rgb(COL_GS)
-rom_rgb = _hex_to_rgb(COL_ROM)
-stops_view["fill_r"] = [gs_rgb[0] if r == "GS" else rom_rgb[0] for r in stops_view["region"]]
-stops_view["fill_g"] = [gs_rgb[1] if r == "GS" else rom_rgb[1] for r in stops_view["region"]]
-stops_view["fill_b"] = [gs_rgb[2] if r == "GS" else rom_rgb[2] for r in stops_view["region"]]
-
-polygon_layer = pdk.Layer(
-    "GeoJsonLayer",
-    data=filtered_geojson,
-    stroked=True,
-    filled=True,
-    get_fill_color="properties._fill",
-    get_line_color=[80, 80, 80],
-    line_width_min_pixels=1,
-    pickable=True,
-)
-
-stops_layer = pdk.Layer(
-    "ScatterplotLayer",
-    data=stops_view,
-    get_position="[stop_lon, stop_lat]",
-    get_fill_color="[fill_r, fill_g, fill_b, 170]",
-    get_radius=40,
-    radius_min_pixels=2,
-    radius_max_pixels=4,
-    pickable=False,
-)
-
-view_state = pdk.ViewState(latitude=-33.85, longitude=151.05, zoom=8.4, pitch=0)
-
-st.pydeck_chart(
-    pdk.Deck(
-        map_provider="carto",
-        map_style="light",
-        layers=[polygon_layer, stops_layer],
-        initial_view_state=view_state,
-        tooltip={"html": "<b>Contract:</b> {contract}<br/><b>Region:</b> {_bucket}"},
-    ),
-    use_container_width=True,
-    height=500,
-)
-
-st.caption(
-    f"Showing {len(filtered_features)} contract polygon(s) and {len(stops_view):,} bus stops "
-    "(sampled from a Sydney-area subset of GTFS stops.txt). Stop-to-region tagging uses "
-    "polygon bounding boxes — accurate away from boundaries, approximate at the edges."
-)
 
 
 # ============================================================
