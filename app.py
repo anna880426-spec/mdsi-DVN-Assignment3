@@ -315,11 +315,9 @@ with st.sidebar:
         help="GS = Greater Sydney | ROM = Outer Metropolitan (Blue Mountains, Hunter, Illawarra, etc.)"
     )
 
-    show_live = st.toggle('Show live alerts', value=True)
-
     # Show live alerts
     show_live = st.toggle('Show live alerts', value=True)
-    
+
     st.markdown("---")
     st.markdown("### About this dashboard")
     st.markdown("""
