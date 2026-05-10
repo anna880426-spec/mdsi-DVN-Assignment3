@@ -588,6 +588,118 @@ st.plotly_chart(fig3, use_container_width=True, theme = None)
 
 
 # ============================================================
+# ── LAYER 2: RIDER DEMAND ────────────────────────────────────
+# ============================================================
+st.markdown("---")
+st.markdown("<div class='section-header'>Layer 2 — Who's Riding, and Who Can't Afford a Bus Not Showing Up?</div>", unsafe_allow_html=True)
+
+st.markdown("""
+<div class='narrative-box'>
+Opal tap-on data tells us <i>who</i> is riding buses. When we look at card types, a clear pattern emerges:
+the majority of trips are taken by <b>CTP (Community Transport), Seniors, School Students, and Concession holders</b> —
+people with the least ability to switch to taxis, rideshares, or private cars.
+When their bus is cancelled or late, they wait. Or they miss the appointment.
+</div>
+""", unsafe_allow_html=True)
+
+
+# ── CHART 4: Opal trips over time (area chart) ──────────────
+st.markdown("#### Monthly Bus Trips by Passenger Type (All NSW)")
+
+TOP_CARDS = [
+    "CTP (Community Transport)",
+    "Adult",
+    "Senior / Pensioner",
+    "School Student",
+    "Concession",
+    "Child / Youth",
+]
+
+# Aggregate trips by month and card label, keep only top 6 types
+opal_agg = (
+    opal[opal["Card_label"].isin(TOP_CARDS)]
+    .groupby(["Year_Month", "Card_label"], as_index=False)["Trip"]
+    .sum()
+)
+
+fig4 = px.area(
+    opal_agg,
+    x="Year_Month",
+    y="Trip",
+    color="Card_label",
+    color_discrete_sequence=px.colors.qualitative.Bold,
+    labels={
+        "Year_Month": "Month",
+        "Trip": "Number of Trips",
+        "Card_label": "Passenger Type"
+    },
+)
+fig4.update_layout(
+    plot_bgcolor="white",
+    yaxis_automargin = True,
+    xaxis_automargin = True,
+    paper_bgcolor="white",
+    height=380,
+    yaxis_tickformat=".2s",   # e.g. 20M instead of 20,000,000
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    margin=dict(t=10, b=20, l=10, r=10),
+    font_color = "black"
+)
+fig4.update_traces(
+    hovertemplate="<b>%{fullData.name}</b><br>Month: %{x|%b %Y}<br>Trips: %{y:,.0f}<extra></extra>"
+)
+
+st.plotly_chart(fig4, use_container_width=True, theme=None)
+
+
+# ── CHART 5: Donut + insight text side by side ──────────────
+st.markdown("#### Who Takes the Most Bus Trips? (2024–2026 total)")
+
+col_pie, col_insight = st.columns([1, 1])
+
+with col_pie:
+    opal_total = (
+        opal[opal["Card_label"].isin(TOP_CARDS)]
+        .groupby("Card_label", as_index=False)["Trip"]
+        .sum()
+        .sort_values("Trip", ascending=False)
+    )
+    fig5 = px.pie(
+        opal_total,
+        names="Card_label",
+        values="Trip",
+        hole=0.45,
+        color_discrete_sequence=px.colors.qualitative.Bold,
+    )
+    fig5.update_traces(
+        textinfo="percent+label",
+        hovertemplate="<b>%{label}</b><br>Total trips: %{value:,.0f}<extra></extra>"
+    )
+    fig5.update_layout(
+        showlegend=False,
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        height=380,
+        margin=dict(t=5, b=60, l=10, r=10),
+        font_color = "black"
+    )
+    st.plotly_chart(fig5, use_container_width=True, theme=None)
+
+with col_insight:
+    st.markdown("""
+    <div class='narrative-box' style='margin-top:40px'>
+    <b>Key insight:</b><br><br>
+    CTP and Senior/Pensioner riders together account for the single largest share of all bus trips in NSW.
+    These passengers are most likely to be:<br><br>
+    &nbsp;&nbsp;• Elderly or living with disability<br>
+    &nbsp;&nbsp;• Car-free <i>by necessity</i>, not by choice<br>
+    &nbsp;&nbsp;• Travelling to medical appointments, schools, or work<br><br>
+    <b>When their bus doesn't show up, there is no Plan B.</b>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ============================================================
 # ── LAYER 3: SPATIAL DISTRIBUTION ───────────────────────────
 # A pydeck map combining two layers:
 #   1) Bus contract region polygons coloured by GS vs ROM
@@ -600,7 +712,7 @@ st.markdown("<div class='section-header'>Layer 3 — Where Are the Buses?</div>"
 
 st.markdown("""
 <div class='narrative-box'>
-Layer 1 showed that Greater Sydney has the worst cancellation rates and driver shortages. But where exactly is this happening?
+Layer 2 showed who depends on buses most. But where exactly are these riders — and where is the network most stretched?
 Outer Metropolitan areas face a different challenge: stops are sparse and spread across vast distances,
 meaning a single cancelled service can leave riders stranded with no nearby alternative.
 The map below shows this geographic reality — select a region in the sidebar to compare.
@@ -820,118 +932,6 @@ than the Outer Metropolitan region, yet its cancellation rate is <b>{_cancel_rat
 ({_gs_cancel:.2%} vs {_rom_cancel:.2%}).
 </div>
 """, unsafe_allow_html=True)
-
-
-# ============================================================
-# ── LAYER 2: RIDER DEMAND ────────────────────────────────────
-# ============================================================
-st.markdown("---")
-st.markdown("<div class='section-header'>Layer 2 — Who's Riding, and Who Can't Afford a Bus Not Showing Up?</div>", unsafe_allow_html=True)
-
-st.markdown("""
-<div class='narrative-box'>
-Opal tap-on data tells us <i>who</i> is riding buses. When we look at card types, a clear pattern emerges:
-the majority of trips are taken by <b>CTP (Community Transport), Seniors, School Students, and Concession holders</b> —
-people with the least ability to switch to taxis, rideshares, or private cars.
-When their bus is cancelled or late, they wait. Or they miss the appointment.
-</div>
-""", unsafe_allow_html=True)
-
-
-# ── CHART 4: Opal trips over time (area chart) ──────────────
-st.markdown("#### Monthly Bus Trips by Passenger Type (All NSW)")
-
-TOP_CARDS = [
-    "CTP (Community Transport)",
-    "Adult",
-    "Senior / Pensioner",
-    "School Student",
-    "Concession",
-    "Child / Youth",
-]
-
-# Aggregate trips by month and card label, keep only top 6 types
-opal_agg = (
-    opal[opal["Card_label"].isin(TOP_CARDS)]
-    .groupby(["Year_Month", "Card_label"], as_index=False)["Trip"]
-    .sum()
-)
-
-fig4 = px.area(
-    opal_agg,
-    x="Year_Month",
-    y="Trip",
-    color="Card_label",
-    color_discrete_sequence=px.colors.qualitative.Bold,
-    labels={
-        "Year_Month": "Month",
-        "Trip": "Number of Trips",
-        "Card_label": "Passenger Type"
-    },
-)
-fig4.update_layout(
-    plot_bgcolor="white",
-    yaxis_automargin = True,
-    xaxis_automargin = True,
-    paper_bgcolor="white",
-    height=380,
-    yaxis_tickformat=".2s",   # e.g. 20M instead of 20,000,000
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    margin=dict(t=10, b=20, l=10, r=10),
-    font_color = "black"
-)
-fig4.update_traces(
-    hovertemplate="<b>%{fullData.name}</b><br>Month: %{x|%b %Y}<br>Trips: %{y:,.0f}<extra></extra>"
-)
-
-st.plotly_chart(fig4, use_container_width=True, theme=None)
-
-
-# ── CHART 5: Donut + insight text side by side ──────────────
-st.markdown("#### Who Takes the Most Bus Trips? (2024–2026 total)")
-
-col_pie, col_insight = st.columns([1, 1])
-
-with col_pie:
-    opal_total = (
-        opal[opal["Card_label"].isin(TOP_CARDS)]
-        .groupby("Card_label", as_index=False)["Trip"]
-        .sum()
-        .sort_values("Trip", ascending=False)
-    )
-    fig5 = px.pie(
-        opal_total,
-        names="Card_label",
-        values="Trip",
-        hole=0.45,
-        color_discrete_sequence=px.colors.qualitative.Bold,
-    )
-    fig5.update_traces(
-        textinfo="percent+label",
-        hovertemplate="<b>%{label}</b><br>Total trips: %{value:,.0f}<extra></extra>"
-    )
-    fig5.update_layout(
-        showlegend=False,
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        height=380,
-        margin=dict(t=5, b=60, l=10, r=10),
-        font_color = "black"
-    )
-    st.plotly_chart(fig5, use_container_width=True, theme=None)
-
-with col_insight:
-    st.markdown("""
-    <div class='narrative-box' style='margin-top:40px'>
-    <b>Key insight:</b><br><br>
-    CTP and Senior/Pensioner riders together account for the single largest share of all bus trips in NSW.
-    These passengers are most likely to be:<br><br>
-    &nbsp;&nbsp;• Elderly or living with disability<br>
-    &nbsp;&nbsp;• Car-free <i>by necessity</i>, not by choice<br>
-    &nbsp;&nbsp;• Travelling to medical appointments, schools, or work<br><br>
-    <b>When their bus doesn't show up, there is no Plan B.</b>
-    </div>
-    """, unsafe_allow_html=True)
 
 
 # ============================================================
