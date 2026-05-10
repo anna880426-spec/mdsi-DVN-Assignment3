@@ -935,7 +935,7 @@ than the Outer Metropolitan region, yet its cancellation rate is <b>{_cancel_rat
 
 
 # ============================================================
-# ── LAYER 2b: CROSS-MODAL DEMAND ─────────────────────────────
+# ── LAYER 3b: CROSS-MODAL DEMAND ─────────────────────────────
 # Layer 2 showed *who* rides the bus. This layer asks whether
 # the people with options are quietly leaving. The all_modes
 # dataset (Bus / Train / Light Rail / Metro / Ferry, 2017–2025)
@@ -945,7 +945,7 @@ than the Outer Metropolitan region, yet its cancellation rate is <b>{_cancel_rat
 # order of magnitude smaller and would flatten the others.
 # ============================================================
 st.markdown("---")
-st.markdown("<div class='section-header'>Layer 2b — Is the Bus Losing Riders?</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-header'>Layer 3b — Is the Bus Losing Riders?</div>", unsafe_allow_html=True)
 
 st.markdown("""
 <div class='narrative-box'>
