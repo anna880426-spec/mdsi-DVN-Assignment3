@@ -12,14 +12,11 @@
 
 import streamlit as st          # The main library that builds the web app
 import pandas as pd             # For loading and working with our data
-import numpy as np              # For maths/calculations
 import plotly.graph_objects as go  # For building interactive charts
 import plotly.express as px # Simpler chart-building on top of plotly
 
-import urllib.request
-import json
-from pathlib import Path
 import pydeck as pdk
+import json
 
 import os
 from dotenv import load_dotenv
@@ -99,16 +96,91 @@ st.markdown("""
 # time the user clicks anything. With it, the app is fast.
 # ============================================================
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def test_load_geo_json(file_path):
-    with open(file_path, 'r') as f:
-        return json.load(f)
-
 @st.cache_data
 def load_static_data():
     r_df = pd.read_csv('routes.txt', dtype={'route_short_name': str, 'agency_id': str})
     s_df = pd.read_csv('stops.txt', dtype={'stop_id': str})
     return r_df, s_df
+
+# ---- Layer 3 (spatial map) loaders --------------------------
+# These two functions feed the choropleth + stop-cloud map.
+# They are cached for a day so the map renders instantly on
+# subsequent reruns and the heavy stops.txt only parses once.
+# -------------------------------------------------------------
+
+# Map TfNSW contract codes to the GS / ROM buckets used elsewhere
+# in the dashboard. "Freezone" overlays and unknowns are excluded.
+REGION_MAP = {
+    "GSBC":  "GS",   # Greater Sydney Bus Contracts
+    "MBSC":  "GS",   # Metropolitan Bus Service Contract
+    "OMBSC": "ROM",  # Outer Metropolitan Bus Service Contract
+    "RURAL": "ROM",  # Rural zone
+}
+
+def _region_bucket(regiontype):
+    return REGION_MAP.get((regiontype or "").upper())
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_bus_contract_geojson():
+    """NSW bus contract regions (36 polygons; regiontype maps to GS / ROM via REGION_MAP)."""
+    with open("bus_contract.geojson", "r", encoding="utf-8") as f:
+        return json.load(f)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_map_stops(max_points=5000):
+    """Load GTFS stops, restrict to the Sydney area, tag each by contract region, sample."""
+    s_df = pd.read_csv(
+        "stops.txt",
+        dtype={"stop_id": str},
+        usecols=["stop_id", "stop_name", "stop_lat", "stop_lon"],
+    )
+    s_df["stop_lat"] = pd.to_numeric(s_df["stop_lat"], errors="coerce")
+    s_df["stop_lon"] = pd.to_numeric(s_df["stop_lon"], errors="coerce")
+    s_df = s_df.dropna(subset=["stop_lat", "stop_lon"])
+    # Sydney bbox: keeps the map focused and removes far-flung non-bus stops
+    s_df = s_df[
+        s_df["stop_lat"].between(-34.2, -33.4)
+        & s_df["stop_lon"].between(150.5, 151.5)
+    ].copy()
+
+    # Build a bounding box per GS/ROM bucket from the contract polygons.
+    # Bbox classification is a deliberate approximation near boundaries —
+    # it avoids a shapely dependency and runs in milliseconds. GS is tested
+    # first because the GS polygons sit inside the broader ROM footprint.
+    geojson = load_bus_contract_geojson()
+    bboxes = {"GS":  [90.0, -90.0, 180.0, -180.0],
+              "ROM": [90.0, -90.0, 180.0, -180.0]}
+    for feat in geojson["features"]:
+        bucket = _region_bucket((feat.get("properties") or {}).get("regiontype"))
+        if bucket is None:
+            continue
+        bb = bboxes[bucket]
+        stack = [feat["geometry"]["coordinates"]]
+        while stack:
+            x = stack.pop()
+            if isinstance(x, list) and x and isinstance(x[0], (int, float)):
+                lo, la = x[0], x[1]
+                if la < bb[0]: bb[0] = la
+                if la > bb[1]: bb[1] = la
+                if lo < bb[2]: bb[2] = lo
+                if lo > bb[3]: bb[3] = lo
+            elif isinstance(x, list):
+                stack.extend(x)
+
+    def _classify(lat, lon):
+        for bucket in ("GS", "ROM"):
+            mn_la, mx_la, mn_lo, mx_lo = bboxes[bucket]
+            if mn_la <= lat <= mx_la and mn_lo <= lon <= mx_lo:
+                return bucket
+        return "UNKNOWN"
+
+    s_df["region"] = [_classify(la, lo) for la, lo in zip(s_df["stop_lat"], s_df["stop_lon"])]
+
+    # Sample so pydeck stays smooth even on slower machines
+    if len(s_df) > max_points:
+        s_df = s_df.sample(n=max_points, random_state=42)
+    return s_df.reset_index(drop=True)
+
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_data():
@@ -140,6 +212,19 @@ def load_data():
     opal["Card_label"] = opal["Card_type"].map(label_map).fillna("Other")
 
     return perf, opal
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_all_modes():
+    """Cross-modal Opal trips (Bus / Train / Light Rail / Metro / Ferry) since 2024."""
+    df = pd.read_csv("all_modes.csv")
+    # Some rows ship lowercase ("bus", "train") — normalise so the same mode
+    # doesn't show up twice in groupbys/legends.
+    df["Travel_Mode"] = df["Travel_Mode"].astype(str).str.strip().str.title()
+    df["Year_Month"] = pd.to_datetime(df["Year_Month"], format="%b-%Y", errors="coerce")
+    df = df.dropna(subset=["Year_Month"])
+    df = df[df["Year_Month"] >= "2024-01-01"].copy()
+    df = df[df["Travel_Mode"].isin(["Bus", "Train", "Light Rail", "Metro", "Ferry"])]
+    return df
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_bus_alerts(api_key):
@@ -194,6 +279,7 @@ def find_stop_name(code):
 # Actually call the function to get our data
 perf, opal = load_data()
 routes_df, stops_df = load_static_data()
+all_modes = load_all_modes()
 
 # ============================================================
 # STEP 4: COLOUR PALETTE
@@ -217,7 +303,7 @@ COL_ROM     = "#E87722"   # Orange    → Outer Metropolitan
 # because they all read from the same filtered dataframe.
 # ============================================================
 with st.sidebar:
-    st.markdown("## 🔍 Filters")
+    st.markdown("## Filters")
     st.markdown("Use these controls to explore the data. All charts update instantly.")
     st.markdown("---")
 
@@ -229,18 +315,11 @@ with st.sidebar:
         help="GS = Greater Sydney | ROM = Outer Metropolitan (Blue Mountains, Hunter, Illawarra, etc.)"
     )
 
-    # Toggle to show/hide the imputed (estimated) data points
-    # show_imputed = st.toggle(
-    #     "Show projected data (Mar–Jun 2026)",
-    #     value=True,
-    #     help="Values after Feb 2026 were estimated using regional averages — not real measurements."
-    # )
-
     # Show live alerts
     show_live = st.toggle('Show live alerts', value=True)
-    
+
     st.markdown("---")
-    st.markdown("### 📌 About this dashboard")
+    st.markdown("### About this dashboard")
     st.markdown("""
     This dashboard explores **bus service reliability** across NSW and the impact on
     riders who depend on buses the most.
@@ -267,10 +346,6 @@ elif selected_region == "ROM – Outer Metropolitan":
 else:
     perf_f = perf.copy()
 
-# Further filter to hide imputed rows if the user toggled it off
-# if not show_imputed:
-#     perf_f = perf_f[~perf_f["is_imputed"]].copy()
-
 
 # ============================================================
 # STEP 7: HERO SECTION
@@ -278,38 +353,9 @@ else:
 # These give the reader the headline numbers immediately.
 # ============================================================
 
-#Doesnt show all the data we want because we need the NSW data its too large.. -> though I do not know what data would be usefull to put on a map anyway..
-# try:
-#     geojson_data = test_load_geo_json('sydney_bus.geojson')
-
-#     geojson_layer = pdk.Layer(
-#         "GeoJsonLayer",
-#         geojson_data,
-#         opacity=0.5,
-#         stroked=True,
-#         filled=True,
-#         get_fill_color=[20, 30, 200],
-#         get_line_color=[255, 255, 255],
-#         line_width_min_pixels=1,
-#     )
-
-#     # Set the initial view
-#     view_state = pdk.ViewState(latitude=-33.8688, longitude=151.2093, zoom=10)
-
-#     # Render the map
-#     st.pydeck_chart(pdk.Deck(
-#         layers=[geojson_layer],
-#         initial_view_state=view_state,
-#         map_style='dark'
-#     ),
-#     width = 800
-#     )
-# except FileNotFoundError:
-#     st.error("Wrong file path")
-
 st.markdown("""
 <h1 style='color:#1B5E96; margin-bottom:4px'>
-    🚌 Where Sydney's Bus Reliability Problems Hurt Riders Most
+    Where Sydney's Bus Reliability Problems Hurt Riders Most
 </h1>
 <p style='color:#555; font-size:17px; margin-top:2px'>
     A data story about outer metropolitan communities left behind by unreliable bus services
@@ -365,22 +411,11 @@ Together, these two regions paint a picture of a network under pressure, where t
 </div>
 """, unsafe_allow_html=True)
 
-# Show the imputed data warning only when projected data is turned on
-# if show_imputed:
-#     st.markdown("""
-#     <div class='imputed-warning'>
-#     ⚠️ <b>Data transparency note:</b> Values from <b>March–June 2026</b> were <b>estimated using regional averages</b>
-#     (mean imputation), not real measurements. They appear as dashed lines in the charts below.
-#     Treat them as indicative projections, not confirmed data.
-#     </div>
-#     """, unsafe_allow_html=True)
-
-
 # ============================================================
 # ── LAYER 1: SERVICE RELIABILITY ────────────────────────────
 # ============================================================
 st.markdown("---")
-st.markdown("<div class='section-header'>📊 Layer 1 — How Reliable Are the Buses?</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-header'>Layer 1 — How Reliable Are the Buses?</div>", unsafe_allow_html=True)
 
 st.markdown("""
 <div class='narrative-box'>
@@ -393,7 +428,7 @@ The TfNSW target is <b>95% on-time running</b> — shown as a red dashed line be
 
 
 # ── CHART 1: OTR over time ──────────────────────────────────
-st.markdown("#### 📈 On-Time Running Rate Over Time")
+st.markdown("#### On-Time Running Rate Over Time")
 
 fig1 = go.Figure()
 
@@ -405,8 +440,7 @@ for region, colour in [("GS", COL_GS), ("ROM", COL_ROM)]:
     if subset.empty:
         continue
 
-    real_rows    = subset[~subset["is_imputed"]]
-    imputed_rows = subset[subset["is_imputed"]]
+    real_rows = subset[~subset["is_imputed"]]
 
     # Solid line = actual measured data
     fig1.add_trace(go.Scatter(
@@ -422,23 +456,6 @@ for region, colour in [("GS", COL_GS), ("ROM", COL_ROM)]:
             "OTR: %{y:.1%}<extra></extra>"
         )
     ))
-    # Dashed line = imputed/projected data
-    # if show_imputed and not imputed_rows.empty:
-    #     # Join the last real point to the first imputed so the line is continuous
-    #     bridge = pd.concat([real_rows.tail(1), imputed_rows])
-    #     fig1.add_trace(go.Scatter(
-    #         x=bridge["Month"],
-    #         y=bridge["OTR"],
-    #         mode="lines",
-    #         name=f"{region} (projected)",
-    #         line=dict(color=colour, width=2, dash="dash"),
-    #         opacity=0.55,
-    #         hovertemplate=(
-    #             f"<b>{region} — projected</b><br>"
-    #             "Month: %{x|%b %Y}<br>"
-    #             "OTR: %{y:.1%}<extra></extra>"
-    #         )
-    #     ))
 
 # Red dotted reference line at 95% target
 fig1.add_hline(
@@ -470,7 +487,7 @@ st.plotly_chart(fig1, use_container_width=True, theme = None)
 
 
 # ── CHART 2: Cancellation rate over time ────────────────────
-st.markdown("#### ❌ Cancellation Rate Over Time")
+st.markdown("#### Cancellation Rate Over Time")
 
 fig2 = go.Figure()
 
@@ -480,8 +497,7 @@ for region, colour in [("GS", COL_GS), ("ROM", COL_ROM)]:
     if subset.empty:
         continue
 
-    real_rows    = subset[~subset["is_imputed"]]
-    imputed_rows = subset[subset["is_imputed"]]
+    real_rows = subset[~subset["is_imputed"]]
 
     # Convert to percentage for readability (0.01 → 1.0%)
     fig2.add_trace(go.Scatter(
@@ -499,22 +515,6 @@ for region, colour in [("GS", COL_GS), ("ROM", COL_ROM)]:
             "Cancelled: %{y:.2f}%<extra></extra>"
         )
     ))
-
-    # if show_imputed and not imputed_rows.empty:
-    #     bridge = pd.concat([real_rows.tail(1), imputed_rows])
-    #     fig2.add_trace(go.Scatter(
-    #         x=bridge["Month"],
-    #         y=bridge["% of services cancelled"] * 100,
-    #         mode="lines",
-    #         name=f"{region} (projected)",
-    #         line=dict(color=colour, width=2, dash="dash"),
-    #         opacity=0.5,
-    #         hovertemplate=(
-    #             f"<b>{region} — projected</b><br>"
-    #             "Month: %{x|%b %Y}<br>"
-    #             "Cancelled: %{y:.2f}%<extra></extra>"
-    #         )
-    #     ))
 
 fig2.update_layout(
     yaxis_title="% of Services Cancelled",
@@ -538,7 +538,7 @@ st.plotly_chart(fig2, use_container_width=True, theme = None)
 # Narrative bridge between charts — scrollytelling in action
 st.markdown("""
 <div class='narrative-box'>
-💡 <b>What's driving cancellations?</b> A major structural cause is driver shortages.
+<b>What's driving cancellations?</b> A major structural cause is driver shortages.
 Greater Sydney has consistently had <b>hundreds of unfilled driver positions</b> every month.
 When there's no driver, the bus simply does not run.
 </div>
@@ -546,7 +546,7 @@ When there's no driver, the bus simply does not run.
 
 
 # ── CHART 3: Driver Vacancies ────────────────────────────────
-st.markdown("#### 🧑‍✈️ Driver Vacancies by Region (Monthly)")
+st.markdown("#### Driver Vacancies by Region (Monthly)")
 
 fig3 = go.Figure()
 
@@ -591,7 +591,7 @@ st.plotly_chart(fig3, use_container_width=True, theme = None)
 # ── LAYER 2: RIDER DEMAND ────────────────────────────────────
 # ============================================================
 st.markdown("---")
-st.markdown("<div class='section-header'>🧑‍🤝‍🧑 Layer 2 — Who's Riding, and Who Can't Afford a Bus Not Showing Up?</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-header'>Layer 2 — Who's Riding, and Who Can't Afford a Bus Not Showing Up?</div>", unsafe_allow_html=True)
 
 st.markdown("""
 <div class='narrative-box'>
@@ -604,7 +604,7 @@ When their bus is cancelled or late, they wait. Or they miss the appointment.
 
 
 # ── CHART 4: Opal trips over time (area chart) ──────────────
-st.markdown("#### 🗓️ Monthly Bus Trips by Passenger Type (All NSW)")
+st.markdown("#### Monthly Bus Trips by Passenger Type (All NSW)")
 
 TOP_CARDS = [
     "CTP (Community Transport)",
@@ -653,7 +653,7 @@ st.plotly_chart(fig4, use_container_width=True, theme=None)
 
 
 # ── CHART 5: Donut + insight text side by side ──────────────
-st.markdown("#### 🥧 Who Takes the Most Bus Trips? (2024–2026 total)")
+st.markdown("#### Who Takes the Most Bus Trips? (2024–2026 total)")
 
 col_pie, col_insight = st.columns([1, 1])
 
@@ -700,6 +700,357 @@ with col_insight:
 
 
 # ============================================================
+# ── LAYER 3: SPATIAL DISTRIBUTION ───────────────────────────
+# A pydeck map combining two layers:
+#   1) Bus contract region polygons coloured by GS vs ROM
+#   2) A sampled cloud of GTFS bus stops (≤5,000 dots)
+# Both layers respect the sidebar region filter so the user
+# can isolate one region at a time.
+# ============================================================
+st.markdown("---")
+st.markdown("<div class='section-header'>Layer 3 — Where Are the Buses?</div>", unsafe_allow_html=True)
+
+st.markdown("""
+<div class='narrative-box'>
+Layer 2 showed who depends on buses most. But where exactly are these riders — and where is the network most stretched?
+Outer Metropolitan areas face a different challenge: stops are sparse and spread across vast distances,
+meaning a single cancelled service can leave riders stranded with no nearby alternative.
+The map below shows this geographic reality — select a region in the sidebar to compare.
+</div>
+""", unsafe_allow_html=True)
+
+# Load (cached) and apply the sidebar filter
+geojson_data = load_bus_contract_geojson()
+map_stops    = load_map_stops(max_points=5000)
+
+if selected_region == "GS – Greater Sydney":
+    region_filter = {"GS"}
+elif selected_region == "ROM – Outer Metropolitan":
+    region_filter = {"ROM"}
+else:
+    region_filter = {"GS", "ROM"}
+
+# Filter polygons to the selected region(s) and tag each with a fill colour
+# that pydeck's GeoJsonLayer can read directly via "properties._fill".
+def _hex_to_rgb(h):
+    h = h.lstrip("#")
+    return [int(h[i:i + 2], 16) for i in (0, 2, 4)]
+
+GS_FILL  = _hex_to_rgb(COL_GS)  + [70]   # last value = alpha (0–255), kept low for transparency
+ROM_FILL = _hex_to_rgb(COL_ROM) + [70]
+
+filtered_features = []
+for feat in geojson_data["features"]:
+    bucket = _region_bucket((feat.get("properties") or {}).get("regiontype"))
+    if bucket not in region_filter:
+        continue
+    # Don't mutate the cached object — copy the feature first
+    new_feat = dict(feat)
+    new_feat["properties"] = dict(feat.get("properties") or {})
+    new_feat["properties"]["_fill"] = GS_FILL if bucket == "GS" else ROM_FILL
+    new_feat["properties"]["_bucket"] = bucket
+    filtered_features.append(new_feat)
+
+filtered_geojson = {"type": "FeatureCollection", "features": filtered_features}
+
+# Filter stops to the selected region(s) and pre-compute per-row RGB values
+stops_view = map_stops[map_stops["region"].isin(region_filter)].copy()
+gs_rgb  = _hex_to_rgb(COL_GS)
+rom_rgb = _hex_to_rgb(COL_ROM)
+stops_view["fill_r"] = [gs_rgb[0] if r == "GS" else rom_rgb[0] for r in stops_view["region"]]
+stops_view["fill_g"] = [gs_rgb[1] if r == "GS" else rom_rgb[1] for r in stops_view["region"]]
+stops_view["fill_b"] = [gs_rgb[2] if r == "GS" else rom_rgb[2] for r in stops_view["region"]]
+
+polygon_layer = pdk.Layer(
+    "GeoJsonLayer",
+    data=filtered_geojson,
+    stroked=True,
+    filled=True,
+    get_fill_color="properties._fill",
+    get_line_color=[80, 80, 80],
+    line_width_min_pixels=1,
+    pickable=True,
+)
+
+stops_layer = pdk.Layer(
+    "ScatterplotLayer",
+    data=stops_view,
+    get_position="[stop_lon, stop_lat]",
+    get_fill_color="[fill_r, fill_g, fill_b, 170]",
+    get_radius=40,
+    radius_min_pixels=2,
+    radius_max_pixels=4,
+    pickable=False,
+)
+
+# ---- Alert overlay (Layer 3 ↔ Layer 4 bridge) -----------------
+# Cross-reference the live-alert stop_ids with stops.txt so we can
+# plot active service disruptions on top of the bus-stop cloud.
+# Falls back gracefully (no extra layer) if the API key is missing
+# or the alerts feed returned nothing usable.
+alert_points = pd.DataFrame()
+if API_KEY:
+    layer3_alerts = fetch_bus_alerts(API_KEY)
+    alert_rows = []
+    for a in layer3_alerts:
+        for sid in a.get("stop_ids", []):
+            alert_rows.append({"stop_id": sid, "header": a.get("header", "")})
+    if alert_rows:
+        alert_points = (
+            pd.DataFrame(alert_rows)
+            .merge(
+                stops_df[["stop_id", "stop_name", "stop_lat", "stop_lon"]],
+                on="stop_id",
+                how="inner",
+            )
+        )
+        alert_points["stop_lat"] = pd.to_numeric(alert_points["stop_lat"], errors="coerce")
+        alert_points["stop_lon"] = pd.to_numeric(alert_points["stop_lon"], errors="coerce")
+        alert_points = alert_points.dropna(subset=["stop_lat", "stop_lon"])
+        # Keep the overlay inside the same Sydney bbox as the rest of the map
+        alert_points = alert_points[
+            alert_points["stop_lat"].between(-34.2, -33.4)
+            & alert_points["stop_lon"].between(150.5, 151.5)
+        ].reset_index(drop=True)
+
+map_layers = [polygon_layer, stops_layer]
+if not alert_points.empty:
+    alert_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=alert_points,
+        get_position="[stop_lon, stop_lat]",
+        get_fill_color=[231, 76, 60, 220],   # #E74C3C
+        get_line_color=[120, 20, 10, 230],
+        line_width_min_pixels=1,
+        get_radius=160,
+        radius_min_pixels=6,
+        radius_max_pixels=11,
+        pickable=False,
+    )
+    map_layers.append(alert_layer)
+
+# Two-column layout: map on the left, region comparison metrics on the right.
+# The right column ties the spatial view back to Layer 1's reliability numbers,
+# so the map becomes analytical rather than purely descriptive.
+perf_real = perf[~perf["is_imputed"]]
+
+map_col, metrics_col = st.columns([3, 2])
+
+with map_col:
+    # Legend — explains the three dot colours on the map below
+    st.markdown(
+        """
+<div style='display:flex; gap:22px; flex-wrap:wrap; font-size:13px;
+            margin: 4px 0 8px 2px; color:#333;'>
+    <span><span style='display:inline-block; width:11px; height:11px;
+        background:#1B5E96; border-radius:50%; vertical-align:middle;
+        margin-right:4px;'></span>GS bus stops</span>
+    <span><span style='display:inline-block; width:11px; height:11px;
+        background:#E87722; border-radius:50%; vertical-align:middle;
+        margin-right:4px;'></span>ROM bus stops</span>
+    <span><span style='display:inline-block; width:13px; height:13px;
+        background:#E74C3C; border-radius:50%; vertical-align:middle;
+        margin-right:4px; box-shadow:0 0 0 1px #7a140a;'></span>
+        Current service disruptions (live alerts)</span>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    view_state = pdk.ViewState(latitude=-33.85, longitude=151.05, zoom=8.4, pitch=0)
+
+    st.pydeck_chart(
+        pdk.Deck(
+            map_provider="carto",
+            map_style="light",
+            layers=map_layers,
+            initial_view_state=view_state,
+            tooltip={"html": "<b>Contract:</b> {contract}<br/><b>Region:</b> {_bucket}"},
+        ),
+        use_container_width=True,
+        height=500,
+    )
+
+    alert_caption = (
+        f" {len(alert_points):,} live alert location(s) overlaid in red."
+        if not alert_points.empty
+        else (" Live-alert overlay unavailable (TRANSPORT_API_KEY not configured)."
+              if not API_KEY else " No active alerts with mapped stops right now.")
+    )
+    st.caption(
+        f"Showing {len(filtered_features)} contract polygon(s) and {len(stops_view):,} bus stops "
+        "(sampled from a Sydney-area subset of GTFS stops.txt). Stop-to-region tagging uses "
+        "polygon bounding boxes — accurate away from boundaries, approximate at the edges."
+        + alert_caption
+    )
+
+with metrics_col:
+    def _show_region_metrics(region_code, region_label):
+        rdf = perf_real[perf_real["Region"] == region_code]
+        n_stops = int((stops_view["region"] == region_code).sum())
+        avg_cancel = rdf["% of services cancelled"].mean()
+        avg_vac = rdf["Driver Vacancies"].mean()
+        avg_compl = rdf["Complaints per 100K"].mean()
+        coverage_stress = (n_stops / avg_vac) if pd.notna(avg_vac) and avg_vac > 0 else float("nan")
+
+        st.markdown(f"**{region_label}**")
+        st.metric("Bus stops (sampled)", f"{n_stops:,}")
+        st.metric("Cancellation rate (avg)", f"{avg_cancel:.2%}")
+        st.metric("Driver vacancies (avg/month)", f"{avg_vac:.0f}")
+        st.metric("Complaints per 100K (avg)", f"{avg_compl:.1f}")
+        st.metric(
+            "Stops per driver vacancy",
+            "—" if pd.isna(coverage_stress) else f"{coverage_stress:,.1f}",
+            help="Sampled stops divided by avg unfilled driver positions — a coverage-stress proxy.",
+        )
+
+    if selected_region == "Both Regions":
+        gs_col, rom_col = st.columns(2)
+        with gs_col:
+            _show_region_metrics("GS", "Greater Sydney")
+        with rom_col:
+            _show_region_metrics("ROM", "Outer Metro")
+    elif selected_region == "GS – Greater Sydney":
+        _show_region_metrics("GS", "Greater Sydney")
+    else:
+        _show_region_metrics("ROM", "Outer Metropolitan")
+
+# Insight — full-width comparison sentence beneath the map and metrics.
+# Uses full GS vs ROM data so the takeaway reads consistently regardless
+# of which region is currently selected in the sidebar.
+_gs_stops_full = int((map_stops["region"] == "GS").sum())
+_rom_stops_full = int((map_stops["region"] == "ROM").sum())
+_gs_cancel = perf_real[perf_real["Region"] == "GS"]["% of services cancelled"].mean()
+_rom_cancel = perf_real[perf_real["Region"] == "ROM"]["% of services cancelled"].mean()
+_stops_ratio = (_gs_stops_full / _rom_stops_full) if _rom_stops_full else 0
+_cancel_ratio = (_gs_cancel / _rom_cancel) if _rom_cancel else 0
+
+st.markdown(f"""
+<div class='narrative-box'>
+<b>Density does not equal reliability.</b> Greater Sydney has roughly <b>{_stops_ratio:.1f}× more bus stops</b>
+than the Outer Metropolitan region, yet its cancellation rate is <b>{_cancel_ratio:.1f}× higher</b>
+({_gs_cancel:.2%} vs {_rom_cancel:.2%}).
+</div>
+""", unsafe_allow_html=True)
+
+
+# ============================================================
+# ── LAYER 3b: CROSS-MODAL DEMAND ─────────────────────────────
+# Layer 2 showed *who* rides the bus. This layer asks whether
+# the people with options are quietly leaving. The all_modes
+# dataset (Bus / Train / Light Rail / Metro / Ferry, 2017–2025)
+# lets us compare bus ridership against alternative modes over
+# the same window covered by Layer 1's reliability charts.
+# Ferry is excluded from the chart because its volume is an
+# order of magnitude smaller and would flatten the others.
+# ============================================================
+st.markdown("---")
+st.markdown("<div class='section-header'>Layer 3b — Is the Bus Losing Riders?</div>", unsafe_allow_html=True)
+
+st.markdown("""
+<div class='narrative-box'>
+<b>Are riders abandoning the bus?</b> If bus reliability is declining, passengers with alternatives may be shifting
+to trains or light rail. The chart below compares monthly ridership trends across transport modes.
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown("#### Monthly Trips by Transport Mode (2024 onwards)")
+
+# Aggregate across all card types so each line is total trips per mode per month
+modes_agg = (
+    all_modes[all_modes["Travel_Mode"] != "Ferry"]
+    .groupby(["Year_Month", "Travel_Mode"], as_index=False)["Trip"]
+    .sum()
+)
+
+# Bus / Train get the brand colours; Light Rail and Metro use grey tones so
+# the eye is drawn to the headline comparison without losing the alternatives.
+MODE_COLOURS = {
+    "Bus":        COL_GS,
+    "Train":      COL_ROM,
+    "Light Rail": "#888888",
+    "Metro":      "#BBBBBB",
+}
+mode_order = ["Bus", "Train", "Light Rail", "Metro"]
+
+fig_modes = go.Figure()
+for mode in mode_order:
+    sub = modes_agg[modes_agg["Travel_Mode"] == mode].sort_values("Year_Month")
+    if sub.empty:
+        continue
+    fig_modes.add_trace(go.Scatter(
+        x=sub["Year_Month"],
+        y=sub["Trip"],
+        mode="lines+markers",
+        name=mode,
+        line=dict(color=MODE_COLOURS[mode], width=2.5),
+        marker=dict(size=5),
+        hovertemplate=(
+            f"<b>{mode}</b><br>"
+            "Month: %{x|%b %Y}<br>"
+            "Trips: %{y:,.0f}<extra></extra>"
+        ),
+    ))
+
+fig_modes.update_layout(
+    yaxis=dict(title="Monthly Trips", tickformat=".2s", automargin=True),
+    xaxis=dict(title="Month", automargin=True),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    plot_bgcolor="white",
+    paper_bgcolor="white",
+    height=380,
+    margin=dict(t=10, b=20, l=10, r=10),
+    font_color="black",
+)
+fig_modes.update_xaxes(showgrid=False)
+fig_modes.update_yaxes(showgrid=False)
+
+st.plotly_chart(fig_modes, use_container_width=True, theme=None)
+
+# Insight: compare the first vs last 3 months of the window so a single
+# anomalous month can't flip the headline number.
+_modes_pivot = modes_agg.pivot(index="Year_Month", columns="Travel_Mode", values="Trip").sort_index()
+_first_3 = _modes_pivot.head(3).mean()
+_last_3  = _modes_pivot.tail(3).mean()
+_pct = ((_last_3 - _first_3) / _first_3 * 100).to_dict()
+
+_bus_pct = _pct.get("Bus", 0.0)
+_train_pct = _pct.get("Train", 0.0)
+_lr_pct = _pct.get("Light Rail", 0.0)
+_metro_pct = _pct.get("Metro", 0.0)
+
+def _verb(p): return "grew" if p >= 0 else "declined"
+_window_start = _modes_pivot.index.min().strftime("%b %Y")
+_window_end   = _modes_pivot.index.max().strftime("%b %Y")
+
+# Headline framing depends on whether bus underperformed the rail alternatives.
+# We compare bus growth against the average of train and light rail (excluding
+# metro, whose growth is dominated by network expansion rather than mode-switch).
+_rail_avg = (_train_pct + _lr_pct) / 2
+if _bus_pct < _rail_avg:
+    _headline = (
+        "<b>The riders with alternatives are voting with their feet.</b> "
+        "Bus growth is lagging the rail network — the people who can switch are switching, "
+        "leaving an even higher concentration of dependent riders on the bus."
+    )
+else:
+    _headline = (
+        "<b>The bus network is holding its own — for now.</b> "
+        "Bus ridership is keeping pace with rail alternatives, but Layer 1's reliability decline "
+        "is a leading indicator: if cancellations keep rising, riders with options will start moving."
+    )
+
+st.markdown(f"""
+<div class='narrative-box'>
+{_headline}
+Between {_window_start} and {_window_end}, bus trips <b>{_verb(_bus_pct)} {abs(_bus_pct):.1f}%</b>
+while train trips <b>{_verb(_train_pct)} {abs(_train_pct):.1f}%</b>
+(light rail {_verb(_lr_pct)} {abs(_lr_pct):.1f}%, metro {_verb(_metro_pct)} {abs(_metro_pct):.1f}%).
+</div>
+""", unsafe_allow_html=True)
+
+
+# ============================================================
 # ── WHAT NEXT: WHAT-IF PARAMETERISATION ─────────────────────
 #
 # ADVANCED FEATURE #2: What-If Parameterisation
@@ -707,7 +1058,7 @@ with col_insight:
 # scenarios and see the estimated impact in real time.
 # ============================================================
 st.markdown("---")
-st.markdown("<div class='section-header'>🔮 What Next — Modelling the Impact of Improvement</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-header'>What Next — Modelling the Impact of Improvement</div>", unsafe_allow_html=True)
 
 st.markdown("""
 <div class='narrative-box'>
@@ -806,7 +1157,7 @@ st.markdown("""
     border-radius: 12px;
     margin-top: 10px;
 '>
-    <h2 style='color:white; margin-top:0'>📢 The Ask: Prioritise Where It Hurts Most</h2>
+    <h2 style='color:white; margin-top:0'>The Ask: Prioritise Where It Hurts Most</h2>
     <p style='font-size:16px; line-height:1.8; opacity:0.95'>
         Greater Sydney carries the heaviest cancellation burden and the most severe driver shortages —
         while its riders include hundreds of thousands of CTP, Senior, and School Student passengers
@@ -821,46 +1172,50 @@ st.markdown("""
     </p>
 </div>
 """, unsafe_allow_html=True)
-
-#####
-# Layer 4
-#####
-
-
-
-st.markdown("<div class='section-header'>Layer 4 — Real Time Alerts</div>", unsafe_allow_html=True)
-if show_live and API_KEY:
+if show_live:
+    st.markdown("<div class='section-header'> Layer 4 — Real time alerts </div>", unsafe_allow_html=True)
     data = fetch_bus_alerts(API_KEY)
-    st.markdown(f"**Active bus alerts fetched:** {len(data)}")
-    if 'alerts_shown' not in st.session_state:
-        st.session_state['alerts_shown'] = min(5, len(data)) if data else 0
-    for entity in data[:st.session_state['alerts_shown']]:
+
+    # Paginate so the page doesn't stretch on with 40+ alerts.
+    # Session-state holds the current visible count; the button below
+    # either reveals 5 more or collapses back to the initial 5.
+    ALERT_PAGE = 5
+    if "alert_count" not in st.session_state:
+        st.session_state.alert_count = ALERT_PAGE
+
+    total_alerts = len(data)
+    visible = min(st.session_state.alert_count, total_alerts)
+
+    for entity in data[:visible]:
         with st.expander(f"Alert: {entity['header'][:100]}..."):
-            st.write(entity['desc'])
-            if entity['route_ids']:
-                st.markdown('**Affected routes**')
-                st.write(', '.join(entity['route_ids'][:10]))
-            if entity['stop_ids']:
-                st.markdown('**Affected stops**')
-                st.write(', '.join(entity['stop_ids'][:10]))
-            if entity['active_periods']:
-                st.markdown('**Active periods**')
-                for period in entity['active_periods']:
-                    start = datetime.fromtimestamp(period['start']).strftime('%Y-%m-%d %H:%M') if period['start'] else 'Unknown'
-                    end = datetime.fromtimestamp(period['end']).strftime('%Y-%m-%d %H:%M') if period['end'] else 'Until further notice'
-                    st.caption(f'{start} to {end}')
-    if data:
-        b1, b2, _ = st.columns([1,1,4])
-        with b1:
-            if st.button('Show more alerts', use_container_width=True, disabled=st.session_state['alerts_shown'] >= len(data)):
-                st.session_state['alerts_shown'] = min(len(data), st.session_state['alerts_shown'] + 5)
+            st.write(f"**Description:** {entity['desc']}")
+
+            # Routes Affected
+            st.markdown("---")
+            st.subheader("Affected Services")
+            for route_id in entity['route_ids']:
+                short, long = find_route_name(route_id)
+                st.info(f"**Route {short}:** {long}")
+            for stop_id in entity['stop_ids']:
+                st.info(f"**Stop: {find_stop_name(stop_id)}**")
+            # Dates
+            for period in entity['active_periods']:
+                start = datetime.fromtimestamp(period['start']).strftime('%Y-%m-%d %H:%M') if period['start'] else "Unknown"
+                end = datetime.fromtimestamp(period['end']).strftime('%Y-%m-%d %H:%M') if period['end'] else "Until further notice"
+                st.caption(f"📅 Active from {start} to {end}")
+
+    if total_alerts > ALERT_PAGE:
+        st.caption(f"Showing {visible} of {total_alerts} alerts")
+        if visible >= total_alerts:
+            if st.button("Show less", key="alerts_show_less"):
+                st.session_state.alert_count = ALERT_PAGE
                 st.rerun()
-        with b2:
-            if st.button('Show fewer alerts', use_container_width=True, disabled=st.session_state['alerts_shown'] <= 5):
-                st.session_state['alerts_shown'] = max(5, st.session_state['alerts_shown'] - 5)
+        else:
+            remaining = total_alerts - visible
+            label = f"Show more alerts ({min(ALERT_PAGE, remaining)} more)"
+            if st.button(label, key="alerts_show_more"):
+                st.session_state.alert_count = min(visible + ALERT_PAGE, total_alerts)
                 st.rerun()
-else:
-    st.info('Live alerts are disabled!')
 
 
 # Footer
