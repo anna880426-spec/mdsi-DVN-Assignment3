@@ -27,7 +27,10 @@ from datetime import datetime
 
 load_dotenv()
 
-API_KEY = os.getenv("TRANSPORT_API_KEY")
+try:
+    API_KEY = st.secrets["TRANSPORT_API_KEY"]
+except (KeyError, FileNotFoundError):
+    API_KEY = os.getenv("TRANSPORT_API_KEY")
 
 # ============================================================
 # STEP 1: PAGE CONFIGURATION

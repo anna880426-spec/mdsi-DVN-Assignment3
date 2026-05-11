@@ -4,3 +4,6 @@ maxMessageSize = 400
 [theme]
 primaryColor = "#1B5E96"
 backgroundColor = "#f8f9fa"
+secondaryBackgroundColor = "#eef2f7"
+textColor = "#1a1a2e"
+font = "sans serif"
