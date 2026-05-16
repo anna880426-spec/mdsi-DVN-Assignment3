@@ -140,7 +140,7 @@ streamlit run app.py
 ```
 
 ### Streamlit Cloud
-Deployed via [Streamlit Cloud](https://share.streamlit.io). API key stored in Streamlit Secrets (`st.secrets["TRANSPORT_API_KEY"]`).
+https://mdsi-dvn-assignment3-4a9frg2mix273fspyzwxnl.streamlit.app/
 
 ## Data Sources
 - [Transport for NSW — Bus Performance Reports](https://opendata.transport.nsw.gov.au)
